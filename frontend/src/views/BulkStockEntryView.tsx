@@ -21,6 +21,7 @@ import {
 import { apiRequest } from '../api/client';
 import { roundTo250, calculateStripPrice } from '../utils/currency';
 import { SmartExpiryInput } from '../components/SmartExpiryInput';
+import { PriceChangesReviewModal, type ChangedPriceItem } from '../components/PriceChangesReviewModal';
 
 interface TableRowItem {
   tempId: string;
@@ -38,6 +39,7 @@ interface TableRowItem {
   bonusPacks: number;
   discountPercent: number;
   purchasePricePack: number;
+  lastPurchasePricePack?: number;
   sellingPricePack: number;
   sellingPriceUnit: number;
   expiryMonth: number;
@@ -60,6 +62,10 @@ export const BulkStockEntryView: React.FC = () => {
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [dueDate, setDueDate] = useState<string>('');
   const [notes, setNotes] = useState('');
+
+  // Price changes review modal state
+  const [showPriceChangesModal, setShowPriceChangesModal] = useState(false);
+  const [changedItemsForReview, setChangedItemsForReview] = useState<ChangedPriceItem[]>([]);
 
   // Search & Table
   const [searchTerm, setSearchTerm] = useState('');
@@ -152,6 +158,7 @@ export const BulkStockEntryView: React.FC = () => {
     const expiryMonth = Number(history?.expiryMonth || 12);
     const expiryYear = Number(history?.expiryYear || currentYear + 2);
     const hasPreviousBatch = !!history?.hasPreviousBatch;
+    const lastPurchasePrice = Number(history?.lastPurchasePricePack || history?.purchasePricePack || med.defaultPurchasePrice || 0);
 
     const newRow: TableRowItem = {
       tempId,
@@ -168,6 +175,7 @@ export const BulkStockEntryView: React.FC = () => {
       bonusPacks,
       discountPercent: 0,
       purchasePricePack,
+      lastPurchasePricePack: lastPurchasePrice,
       sellingPricePack,
       sellingPriceUnit,
       expiryMonth,
@@ -306,10 +314,34 @@ export const BulkStockEntryView: React.FC = () => {
   };
 
   // Save the entire batch to DB
-  const handleSaveBulkBatch = async () => {
+  const handleSaveBulkBatch = async (forceConfirm = false) => {
     if (items.length === 0) {
       alert('يرجى إضافة مادة واحدة على الأقل في الوجبة');
       return;
+    }
+
+    if (!forceConfirm) {
+      const changed = items
+        .filter(
+          (i) =>
+            i.lastPurchasePricePack !== undefined &&
+            i.lastPurchasePricePack > 0 &&
+            i.purchasePricePack > 0 &&
+            i.purchasePricePack !== i.lastPurchasePricePack,
+        )
+        .map((i) => ({
+          id: i.tempId,
+          tradeName: i.customName || i.tradeName,
+          lastPurchasePrice: i.lastPurchasePricePack!,
+          newPurchasePrice: i.purchasePricePack,
+          unitsPerPack: i.unitsPerPack,
+        }));
+
+      if (changed.length > 0) {
+        setChangedItemsForReview(changed);
+        setShowPriceChangesModal(true);
+        return;
+      }
     }
 
     setLoading(true);
@@ -415,7 +447,7 @@ export const BulkStockEntryView: React.FC = () => {
             </div>
 
             <button
-              onClick={handleSaveBulkBatch}
+              onClick={() => handleSaveBulkBatch(false)}
               disabled={items.length === 0 || loading}
               className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-bold shadow-xs transition-all active:scale-95 cursor-pointer"
             >
@@ -828,13 +860,29 @@ export const BulkStockEntryView: React.FC = () => {
                         <input
                           id={`input-price-${idx}`}
                           type="number"
-                          min="250"
+                          min="0"
                           step="250"
                           value={row.purchasePricePack}
                           onChange={(e) => updateRowField(row.tempId, 'purchasePricePack', Number(e.target.value))}
                           onKeyDown={(e) => handleKeyDown(e, `input-discount-${idx}`)}
                           className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-md font-bold text-slate-900 text-left"
                         />
+                        {row.lastPurchasePricePack !== undefined &&
+                          row.lastPurchasePricePack > 0 &&
+                          row.purchasePricePack > 0 &&
+                          row.purchasePricePack !== row.lastPurchasePricePack && (
+                            <div
+                              className={`text-[10px] mt-1 font-bold leading-tight ${
+                                row.purchasePricePack > row.lastPurchasePricePack
+                                  ? 'text-rose-600'
+                                  : 'text-emerald-600'
+                              }`}
+                            >
+                              {row.purchasePricePack > row.lastPurchasePricePack
+                                ? `🔺 ارتفع سعر الشراء (آخر سعر: ${row.lastPurchasePricePack.toLocaleString()} د.ع)`
+                                : `🔻 انخفض سعر الشراء (آخر سعر: ${row.lastPurchasePricePack.toLocaleString()} د.ع)`}
+                            </div>
+                          )}
                       </td>
 
                       {/* Discount % */}
@@ -1171,6 +1219,18 @@ export const BulkStockEntryView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Group Alert for Purchase Price Changes before Confirmation */}
+      <PriceChangesReviewModal
+        isOpen={showPriceChangesModal}
+        items={changedItemsForReview}
+        onConfirm={() => {
+          setShowPriceChangesModal(false);
+          handleSaveBulkBatch(true);
+        }}
+        onCancel={() => setShowPriceChangesModal(false)}
+        isSubmitting={loading}
+      />
     </div>
   );
 };

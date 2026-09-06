@@ -16,6 +16,7 @@ export interface ScannedInvoiceItem {
   bonusQuantity: number;
   unitsPerPack: number;
   purchasePricePack: number;
+  lastPurchasePricePack?: number;
   discountPercent: number;
   sellingPricePack: number;
   sellingPriceUnit?: number;
@@ -341,6 +342,7 @@ export class OcrAiService {
         bonusQuantity,
         unitsPerPack: units,
         purchasePricePack: purchasePrice,
+        lastPurchasePricePack: Number(existingBatch?.purchasePricePack || 0),
         discountPercent,
         sellingPricePack: finalSellingPrice,
         sellingPriceUnit: unitPrice,

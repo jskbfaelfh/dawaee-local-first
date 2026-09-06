@@ -69,6 +69,7 @@ export const InventoryView: React.FC = () => {
     sellingPricePack: 0,
     sellingPriceUnit: 0,
     purchasePricePack: 0,
+    lastPurchasePricePack: 0,
     quantityPacks: 10,
     unitsPerPack: 1,
     shelfLocation: '',
@@ -252,17 +253,19 @@ export const InventoryView: React.FC = () => {
     } catch (e) {}
 
     const defaultUnits = Number(history?.unitsPerPack || units);
+    const lastPurchasePrice = Number(history?.lastPurchasePricePack || history?.purchasePricePack || med.defaultPurchasePrice || 0);
     const purchasePrice = Number(history?.purchasePricePack || med.defaultPurchasePrice || 0);
     const sellingPack = Number(history?.sellingPricePack || 0);
     let sellingUnit = Number(history?.sellingPriceUnit || 0);
     if (sellingUnit === 0 && sellingPack > 0 && defaultUnits > 0) {
-      sellingUnit = Math.round(sellingPack / defaultUnits);
+      sellingUnit = calculateStripPrice(sellingPack, defaultUnits);
     }
 
     setQuickAddForm({
       sellingPricePack: sellingPack,
       sellingPriceUnit: sellingUnit,
       purchasePricePack: purchasePrice,
+      lastPurchasePricePack: lastPurchasePrice,
       quantityPacks: 10,
       unitsPerPack: defaultUnits,
       shelfLocation: history?.shelfLocation || '',
@@ -1702,6 +1705,22 @@ export const InventoryView: React.FC = () => {
                     placeholder="مثال: 3500"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-900 focus:bg-white focus:border-indigo-600 focus:outline-hidden"
                   />
+                  {quickAddForm.lastPurchasePricePack !== undefined &&
+                    quickAddForm.lastPurchasePricePack > 0 &&
+                    quickAddForm.purchasePricePack > 0 &&
+                    quickAddForm.purchasePricePack !== quickAddForm.lastPurchasePricePack && (
+                      <div
+                        className={`text-[10px] mt-1 font-bold leading-tight ${
+                          quickAddForm.purchasePricePack > quickAddForm.lastPurchasePricePack
+                            ? 'text-rose-600'
+                            : 'text-emerald-600'
+                        }`}
+                      >
+                        {quickAddForm.purchasePricePack > quickAddForm.lastPurchasePricePack
+                          ? `🔺 ارتفع سعر الشراء (آخر سعر: ${quickAddForm.lastPurchasePricePack.toLocaleString()} د.ع)`
+                          : `🔻 انخفض سعر الشراء (آخر سعر: ${quickAddForm.lastPurchasePricePack.toLocaleString()} د.ع)`}
+                      </div>
+                    )}
                 </div>
 
                 <div>

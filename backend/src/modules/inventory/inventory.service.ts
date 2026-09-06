@@ -1047,9 +1047,14 @@ END $$;`;
       inventoryItem?.unitsPerPack || lastPurchase?.unitsPerPack || master?.unitsPerPack || 1,
     );
 
-    const purchasePricePack = Number(
+    const lastPurchasePricePack = Number(
       lastPurchase?.purchasePricePack ||
         lastBatch?.purchasePricePack ||
+        0,
+    );
+
+    const purchasePricePack = Number(
+      lastPurchasePricePack ||
         master?.defaultPurchasePrice ||
         0,
     );
@@ -1089,6 +1094,7 @@ END $$;`;
       barcode: master?.barcode || barcode || '',
       unitsPerPack,
       purchasePricePack,
+      lastPurchasePricePack,
       sellingPricePack,
       sellingPriceUnit,
       shelfLocation,

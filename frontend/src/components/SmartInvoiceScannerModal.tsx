@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { SmartExpiryInput } from './SmartExpiryInput';
+import { PriceChangesReviewModal, type ChangedPriceItem } from './PriceChangesReviewModal';
 
 export interface ScannedItem {
   id: string;
@@ -28,6 +29,7 @@ export interface ScannedItem {
   quantityPacks: number;
   bonusPacks: number;
   purchasePricePack: number;
+  lastPurchasePricePack?: number;
   discountPercent: number;
   sellingPricePack: number;
   sellingPriceUnit: number;
@@ -77,6 +79,8 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showPriceChangesModal, setShowPriceChangesModal] = useState(false);
+  const [changedItemsForReview, setChangedItemsForReview] = useState<ChangedPriceItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Automatic smart compression on file select
@@ -173,6 +177,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
             quantityPacks: Number(it.quantityPacks) || 1,
             bonusPacks: Number(it.bonusQuantity || it.bonusPacks) || 0,
             purchasePricePack: Number(it.purchasePricePack) || 0,
+            lastPurchasePricePack: Number(it.lastPurchasePricePack || 0),
             discountPercent: Number(it.discountPercent) || 0,
             sellingPricePack: sellPack,
             sellingPriceUnit: sellUnit,
@@ -305,6 +310,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
       quantityPacks: 1,
       bonusPacks: 0,
       purchasePricePack: 0,
+      lastPurchasePricePack: 0,
       discountPercent: 0,
       sellingPricePack: 0,
       sellingPriceUnit: 0,
@@ -347,7 +353,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
   };
 
   // Final confirmation: Convert AI review to real purchase invoice in database
-  const handleApproveInvoice = async () => {
+  const handleApproveInvoice = async (forceConfirm = false) => {
     if (!invoiceNumber.trim()) {
       setErrorMsg('يرجى إدخال رقم الفاتورة');
       return;
@@ -359,6 +365,30 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
     if (items.length === 0) {
       setErrorMsg('يجب أن تحتوي الفاتورة على دواء واحد على الأقل');
       return;
+    }
+
+    if (!forceConfirm) {
+      const changed = items
+        .filter(
+          (it) =>
+            it.lastPurchasePricePack !== undefined &&
+            it.lastPurchasePricePack > 0 &&
+            it.purchasePricePack > 0 &&
+            it.purchasePricePack !== it.lastPurchasePricePack,
+        )
+        .map((it) => ({
+          id: it.id,
+          tradeName: (it.matchedTradeName || it.rawName || 'دواء').trim(),
+          lastPurchasePrice: it.lastPurchasePricePack!,
+          newPurchasePrice: it.purchasePricePack,
+          unitsPerPack: it.unitsPerPack,
+        }));
+
+      if (changed.length > 0) {
+        setChangedItemsForReview(changed);
+        setShowPriceChangesModal(true);
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -912,6 +942,22 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                                   placeholder="سعر الشراء"
                                   className="w-24 p-1.5 bg-white border border-slate-300 rounded-lg font-mono font-black text-slate-900 text-xs focus:border-emerald-500 focus:outline-hidden"
                                 />
+                                {item.lastPurchasePricePack !== undefined &&
+                                  item.lastPurchasePricePack > 0 &&
+                                  item.purchasePricePack > 0 &&
+                                  item.purchasePricePack !== item.lastPurchasePricePack && (
+                                    <div
+                                      className={`text-[10px] mt-0.5 font-bold leading-tight ${
+                                        item.purchasePricePack > item.lastPurchasePricePack
+                                          ? 'text-rose-600'
+                                          : 'text-emerald-600'
+                                      }`}
+                                    >
+                                      {item.purchasePricePack > item.lastPurchasePricePack
+                                        ? `🔺 ارتفع (آخر سعر: ${item.lastPurchasePricePack.toLocaleString()} د.ع)`
+                                        : `🔻 انخفض (آخر سعر: ${item.lastPurchasePricePack.toLocaleString()} د.ع)`}
+                                    </div>
+                                  )}
                               </td>
 
                               {/* 7. Discount Percent on Item */}
@@ -1133,7 +1179,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                 id="scanner-save-batch-btn"
                 type="button"
                 disabled={submitting}
-                onClick={handleApproveInvoice}
+                onClick={() => handleApproveInvoice(false)}
                 className="px-7 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-black text-xs shadow-lg shadow-emerald-900/20 flex items-center gap-2 cursor-pointer transition-all transform active:scale-95"
               >
                 {submitting ? (
@@ -1152,6 +1198,18 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
           )}
         </div>
       </div>
+
+      {/* Group Alert for Purchase Price Changes before Final Confirmation */}
+      <PriceChangesReviewModal
+        isOpen={showPriceChangesModal}
+        items={changedItemsForReview}
+        onConfirm={() => {
+          setShowPriceChangesModal(false);
+          handleApproveInvoice(true);
+        }}
+        onCancel={() => setShowPriceChangesModal(false)}
+        isSubmitting={submitting}
+      />
     </div>
   );
 };
