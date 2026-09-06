@@ -12,6 +12,7 @@ import {
   X,
   Banknote,
   Clock,
+  Percent,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 
@@ -43,6 +44,9 @@ export const SuppliersDebtView: React.FC = () => {
   const [payingSupplier, setPayingSupplier] = useState<any | null>(null);
   const [paymentForm, setPaymentForm] = useState({
     amount: 0,
+    discountPercent: 0,
+    discountAmount: 0,
+    netPaidAmount: 0,
     paymentDate: new Date().toISOString().slice(0, 10),
     paymentMethod: 'CASH',
     receiptNumber: '',
@@ -136,9 +140,13 @@ export const SuppliersDebtView: React.FC = () => {
 
   // Open Payment Modal
   const openPaymentModal = (s: any) => {
+    const totalDebt = Number(s.totalRemainingDebt || 0);
     setPayingSupplier(s);
     setPaymentForm({
-      amount: Number(s.totalRemainingDebt || 0),
+      amount: totalDebt,
+      discountPercent: 0,
+      discountAmount: 0,
+      netPaidAmount: totalDebt,
       paymentDate: new Date().toISOString().slice(0, 10),
       paymentMethod: 'CASH',
       receiptNumber: '',
@@ -190,7 +198,7 @@ export const SuppliersDebtView: React.FC = () => {
         {/* Card 1: Total Outstanding Debt */}
         <div className="bg-rose-50 border border-rose-200 p-4 rounded-2xl text-right shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-rose-800">الديون المطلوبة</span>
+            <span className="text-xs font-bold text-rose-800">الديون</span>
             <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center text-rose-700">
               <Banknote className="w-4 h-4" />
             </div>
@@ -199,14 +207,14 @@ export const SuppliersDebtView: React.FC = () => {
             {Number(summary.totalRemainingDebt || 0).toLocaleString()} <span className="text-xs font-bold text-rose-800">د.ع</span>
           </div>
           <div className="text-[11px] text-rose-700 font-bold mt-0.5">
-            لـ {summary.indebtedSuppliersCount || 0} مذخر
+            {summary.indebtedSuppliersCount || 0} مذخر
           </div>
         </div>
 
         {/* Card 2: Total Purchases */}
         <div className="bg-indigo-50 border border-indigo-200 p-4 rounded-2xl text-right shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-indigo-800">إجمالي المشتريات</span>
+            <span className="text-xs font-bold text-indigo-800">المشتريات</span>
             <div className="w-8 h-8 rounded-xl bg-indigo-100 flex items-center justify-center text-indigo-700">
               <Building2 className="w-4 h-4" />
             </div>
@@ -215,14 +223,14 @@ export const SuppliersDebtView: React.FC = () => {
             {Number(summary.totalPurchasedAmount || 0).toLocaleString()} <span className="text-xs font-bold text-indigo-800">د.ع</span>
           </div>
           <div className="text-[11px] text-indigo-700 font-bold mt-0.5">
-            صافي الفواتير
+            الفواتير
           </div>
         </div>
 
         {/* Card 3: Total Paid Amount */}
         <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-right shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-emerald-800">المبالغ المسددة</span>
+            <span className="text-xs font-bold text-emerald-800">الواصل</span>
             <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-700">
               <CheckCircle2 className="w-4 h-4" />
             </div>
@@ -231,7 +239,7 @@ export const SuppliersDebtView: React.FC = () => {
             {Number(summary.totalPaidAmount || 0).toLocaleString()} <span className="text-xs font-bold text-emerald-800">د.ع</span>
           </div>
           <div className="text-[11px] text-emerald-700 font-bold mt-0.5">
-            الدفعات الواصلة
+            مسدد
           </div>
         </div>
 
@@ -247,7 +255,7 @@ export const SuppliersDebtView: React.FC = () => {
             {summary.suppliersCount || 0}
           </div>
           <div className="text-[11px] text-slate-500 font-bold mt-0.5">
-            مذخر مسجل
+            مذخر
           </div>
         </div>
       </div>
@@ -280,7 +288,7 @@ export const SuppliersDebtView: React.FC = () => {
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="ابحث بالمذخر أو الهاتف..."
+              placeholder="بحث..."
               className="w-full pr-9 pl-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
             />
           </div>
@@ -315,7 +323,7 @@ export const SuppliersDebtView: React.FC = () => {
                   : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
               }`}
             >
-              المسددة
+              واصل
             </button>
           </div>
 
@@ -330,7 +338,7 @@ export const SuppliersDebtView: React.FC = () => {
               className="flex items-center gap-1.5 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all active:scale-95 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              + إضافة مذخر
+              مذخر جديد +
             </button>
 
             <button
@@ -353,25 +361,25 @@ export const SuppliersDebtView: React.FC = () => {
                 <th className="p-2.5 min-w-[110px]">الهاتف</th>
                 <th className="p-2.5 w-16 text-center">الفواتير</th>
                 <th className="p-2.5 min-w-[100px]">المشتريات</th>
-                <th className="p-2.5 min-w-[100px]">المسدد</th>
-                <th className="p-2.5 min-w-[110px] bg-rose-50/50 text-rose-900">الديون</th>
+                <th className="p-2.5 min-w-[100px]">الواصل</th>
+                <th className="p-2.5 min-w-[110px] bg-rose-50/50 text-rose-900">الباقي</th>
                 <th className="p-2.5 min-w-[90px]">الحالة</th>
-                <th className="p-2.5 text-center min-w-[170px]">الإجراءات</th>
+                <th className="p-2.5 text-center min-w-[170px]">إجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
                   <td colSpan={9} className="p-12 text-center text-slate-400 font-bold">
-                    جاري تحميل دليل المذاخر وقائمة المديونية...
+                    جاري التحميل...
                   </td>
                 </tr>
               ) : filteredSuppliers.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="p-12 text-center text-slate-400 font-bold">
                     {filterMode === 'DEBT_ONLY'
-                      ? '🎉 لا توجد ديون مستحقة لأي مذخر حالياً!'
-                      : 'لا توجد مذاخر تطابق خيارات البحث.'}
+                      ? 'لا توجد ديون حالياً'
+                      : 'لا توجد نتائج'}
                   </td>
                 </tr>
               ) : (
@@ -430,7 +438,7 @@ export const SuppliersDebtView: React.FC = () => {
                         {debt > 0 && s.nextDueDate && (
                           <div className="text-[10px] text-rose-600 flex items-center gap-1 mt-0.5">
                             <Clock className="w-2.5 h-2.5" />
-                            استحقاق: {new Date(s.nextDueDate).toLocaleDateString('ar-IQ')}
+                            موعد: {new Date(s.nextDueDate).toLocaleDateString('ar-IQ')}
                           </div>
                         )}
                       </td>
@@ -440,12 +448,12 @@ export const SuppliersDebtView: React.FC = () => {
                         {isSettled ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-[10px] font-black">
                             <CheckCircle2 className="w-3 h-3" />
-                            مسدد بالكامل
+                            واصل
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-50 text-rose-700 border border-rose-200 rounded-full text-[10px] font-black">
                             <AlertCircle className="w-3 h-3" />
-                            مديونية مستحقة
+                            مطلوب
                           </span>
                         )}
                       </td>
@@ -458,7 +466,7 @@ export const SuppliersDebtView: React.FC = () => {
                             onClick={() => openPaymentModal(s)}
                             disabled={isSettled}
                             className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg font-bold text-xs flex items-center gap-1 cursor-pointer transition-all active:scale-95"
-                            title="تسديد دفعة"
+                            title="تسديد"
                           >
                             <Banknote className="w-3.5 h-3.5" />
                             تسديد
@@ -471,7 +479,7 @@ export const SuppliersDebtView: React.FC = () => {
                             title="كشف حساب"
                           >
                             <FileText className="w-3.5 h-3.5 text-indigo-600" />
-                            كشف الحساب
+                            كشف
                           </button>
 
                           {/* Edit Supplier */}
@@ -591,7 +599,7 @@ export const SuppliersDebtView: React.FC = () => {
             </div>
 
             <div className="my-3 bg-rose-50 border border-rose-200 p-3 rounded-xl flex items-center justify-between text-xs">
-              <span className="font-bold text-rose-800">الدين الحالي:</span>
+              <span className="font-bold text-rose-800">الباقي:</span>
               <span className="text-base font-black text-rose-950 font-mono">
                 {Number(payingSupplier.totalRemainingDebt).toLocaleString()} د.ع
               </span>
@@ -599,7 +607,7 @@ export const SuppliersDebtView: React.FC = () => {
 
             <form onSubmit={handleRecordPayment} className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">المبلغ المدفوع (د.ع) *</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">المبلغ المطلوب تسديده من الدين *</label>
                 <input
                   type="number"
                   required
@@ -607,9 +615,161 @@ export const SuppliersDebtView: React.FC = () => {
                   step="250"
                   max={Number(payingSupplier.totalRemainingDebt)}
                   value={paymentForm.amount}
-                  onChange={(e) => setPaymentForm({ ...paymentForm, amount: Number(e.target.value) })}
+                  onChange={(e) => {
+                    const newAmount = Number(e.target.value);
+                    const discAmt =
+                      paymentForm.discountPercent > 0
+                        ? Math.round((newAmount * paymentForm.discountPercent) / 100)
+                        : 0;
+                    setPaymentForm({
+                      ...paymentForm,
+                      amount: newAmount,
+                      discountAmount: discAmt,
+                      netPaidAmount: Math.max(0, newAmount - discAmt),
+                    });
+                  }}
                   className="w-full px-3 py-2 bg-emerald-50/50 border border-emerald-300 rounded-xl text-base font-black text-emerald-950 font-mono"
                 />
+              </div>
+
+              {/* Optional Discount on Payment as a Percentage */}
+              <div className="bg-amber-50/70 border border-amber-200/80 p-3 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-black text-amber-950 flex items-center gap-1.5">
+                    <Percent className="w-3.5 h-3.5 text-amber-700" />
+                    <span>خصم التسديد (اختياري)</span>
+                  </label>
+                  {paymentForm.discountPercent > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPaymentForm((prev) => ({
+                          ...prev,
+                          discountPercent: 0,
+                          discountAmount: 0,
+                          netPaidAmount: prev.amount,
+                        }));
+                      }}
+                      className="text-[11px] font-bold text-amber-700 hover:text-amber-900 underline cursor-pointer"
+                    >
+                      إلغاء الخصم
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-bold text-amber-900 mb-0.5">نسبة الخصم %</label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        value={paymentForm.discountPercent || ''}
+                        onChange={(e) => {
+                          const pct = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                          const discAmt = Math.round((paymentForm.amount * pct) / 100);
+                          setPaymentForm((prev) => ({
+                            ...prev,
+                            discountPercent: pct,
+                            discountAmount: discAmt,
+                            netPaidAmount: Math.max(0, prev.amount - discAmt),
+                          }));
+                        }}
+                        placeholder="0"
+                        className="w-full pl-7 pr-3 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-black font-mono text-amber-950 focus:border-amber-500 focus:outline-hidden"
+                      />
+                      <span className="absolute left-2.5 top-1.5 text-xs font-black text-amber-700">%</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-amber-900 mb-0.5">مبلغ الخصم (د.ع)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="250"
+                      max={paymentForm.amount}
+                      value={paymentForm.discountAmount || ''}
+                      onChange={(e) => {
+                        const discAmt = Math.max(0, Math.min(paymentForm.amount, Number(e.target.value) || 0));
+                        const pct =
+                          paymentForm.amount > 0 ? Number(((discAmt / paymentForm.amount) * 100).toFixed(2)) : 0;
+                        setPaymentForm((prev) => ({
+                          ...prev,
+                          discountAmount: discAmt,
+                          discountPercent: pct,
+                          netPaidAmount: Math.max(0, prev.amount - discAmt),
+                        }));
+                      }}
+                      placeholder="0"
+                      className="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold font-mono text-amber-950 focus:border-amber-500 focus:outline-hidden"
+                    />
+                  </div>
+                </div>
+
+                {/* Quick Preset Percentage Buttons */}
+                <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                  <span className="text-[10px] text-amber-800 font-bold ml-1">نسب سريعة:</span>
+                  {[0, 2, 3, 4, 5, 6, 8, 10].map((pct) => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => {
+                        const discAmt = Math.round((paymentForm.amount * pct) / 100);
+                        setPaymentForm((prev) => ({
+                          ...prev,
+                          discountPercent: pct,
+                          discountAmount: discAmt,
+                          netPaidAmount: Math.max(0, prev.amount - discAmt),
+                        }));
+                      }}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-black transition-all cursor-pointer ${
+                        paymentForm.discountPercent === pct
+                          ? 'bg-amber-600 text-white shadow-xs'
+                          : 'bg-white border border-amber-200 text-amber-900 hover:bg-amber-100'
+                      }`}
+                    >
+                      {pct === 0 ? 'بدون' : `${pct}%`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Live Financial Breakdown */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-1.5 text-xs">
+                <div className="flex items-center justify-between text-slate-600 font-bold">
+                  <span>المخصوم من الدين:</span>
+                  <span className="font-mono text-slate-900 font-black">
+                    {paymentForm.amount.toLocaleString()} د.ع
+                  </span>
+                </div>
+
+                {paymentForm.discountAmount > 0 && (
+                  <div className="flex items-center justify-between text-amber-800 font-bold">
+                    <span>خصم التسديد المكتسب ({paymentForm.discountPercent}%):</span>
+                    <span className="font-mono font-black">-{paymentForm.discountAmount.toLocaleString()} د.ع</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-1.5 border-t border-slate-200">
+                  <span className="font-black text-emerald-950">الصافي المدفوع نقداً للمذخر:</span>
+                  <span className="font-mono font-black text-base text-emerald-700">
+                    {(paymentForm.amount - paymentForm.discountAmount).toLocaleString()} د.ع
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-slate-400 font-bold pt-0.5">
+                  <span>المتبقي من الدين بعد السداد:</span>
+                  <span className="font-mono text-slate-600 font-bold">
+                    {Math.max(
+                      0,
+                      Number(payingSupplier.totalRemainingDebt) - paymentForm.amount,
+                    ).toLocaleString()}{' '}
+                    د.ع
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -640,12 +800,12 @@ export const SuppliersDebtView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">رقم الوصل (اختياري)</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">رقم الوصل</label>
                 <input
                   type="text"
                   value={paymentForm.receiptNumber}
                   onChange={(e) => setPaymentForm({ ...paymentForm, receiptNumber: e.target.value })}
-                  placeholder="مثال: REC-49210"
+                  placeholder="REC-..."
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-mono font-bold"
                 />
               </div>
@@ -656,7 +816,7 @@ export const SuppliersDebtView: React.FC = () => {
                   type="text"
                   value={paymentForm.notes}
                   onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })}
-                  placeholder="دفعة حساب..."
+                  placeholder="دفعة..."
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs"
                 />
               </div>
@@ -667,7 +827,7 @@ export const SuppliersDebtView: React.FC = () => {
                   disabled={payingLoading}
                   className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-xs cursor-pointer transition-all active:scale-95"
                 >
-                  {payingLoading ? 'جاري الحفظ...' : 'حفظ الوصل'}
+                  {payingLoading ? 'جاري الحفظ...' : 'حفظ'}
                 </button>
                 <button
                   type="button"
@@ -691,7 +851,7 @@ export const SuppliersDebtView: React.FC = () => {
               <div>
                 <h3 className="font-black text-slate-900 text-base flex items-center gap-2">
                   <FileText className="w-5 h-5 text-indigo-600" />
-                  كشف الحساب: {ledgerSupplier.name}
+                  كشف حساب: {ledgerSupplier.name}
                 </h3>
               </div>
               <button onClick={() => setLedgerSupplier(null)} className="text-slate-400 hover:text-slate-600">
@@ -709,13 +869,13 @@ export const SuppliersDebtView: React.FC = () => {
                   </span>
                 </div>
                 <div className="bg-emerald-50 p-2.5 rounded-xl border border-emerald-200 text-right">
-                  <span className="text-[11px] font-bold text-emerald-800 block">المسدد</span>
+                  <span className="text-[11px] font-bold text-emerald-800 block">الواصل</span>
                   <span className="text-sm font-black text-emerald-950 font-mono">
                     {Number(ledgerData.summary.totalPaid).toLocaleString()} د.ع
                   </span>
                 </div>
                 <div className="bg-rose-50 p-2.5 rounded-xl border border-rose-200 text-right">
-                  <span className="text-[11px] font-bold text-rose-800 block">الديون</span>
+                  <span className="text-[11px] font-bold text-rose-800 block">الباقي</span>
                   <span className="text-sm font-black text-rose-950 font-mono">
                     {Number(ledgerData.summary.totalDebt).toLocaleString()} د.ع
                   </span>
@@ -751,7 +911,7 @@ export const SuppliersDebtView: React.FC = () => {
             <div className="flex-1 overflow-y-auto min-h-0">
               {ledgerLoading ? (
                 <div className="py-12 text-center text-slate-400 font-bold text-xs">
-                  جاري تحميل كشف الحساب...
+                  جاري التحميل...
                 </div>
               ) : ledgerTab === 'INVOICES' ? (
                 <table className="w-full text-right text-xs">
@@ -759,9 +919,9 @@ export const SuppliersDebtView: React.FC = () => {
                     <tr>
                       <th className="p-2.5">رقم الفاتورة</th>
                       <th className="p-2.5">التاريخ</th>
-                      <th className="p-2.5">صافي الفاتورة</th>
-                      <th className="p-2.5">المدفوع</th>
-                      <th className="p-2.5">المتبقي</th>
+                      <th className="p-2.5">المجموع</th>
+                      <th className="p-2.5">الواصل</th>
+                      <th className="p-2.5">الباقي</th>
                       <th className="p-2.5">الحالة</th>
                     </tr>
                   </thead>
@@ -769,7 +929,7 @@ export const SuppliersDebtView: React.FC = () => {
                     {ledgerData?.invoices?.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="p-6 text-center text-slate-400 font-bold">
-                          لا توجد فواتير مسجلة لهذا المذخر بعد.
+                          لا توجد فواتير
                         </td>
                       </tr>
                     ) : (
@@ -810,18 +970,20 @@ export const SuppliersDebtView: React.FC = () => {
                 <table className="w-full text-right text-xs">
                   <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
                     <tr>
-                      <th className="p-2.5">تاريخ الدفعة</th>
-                      <th className="p-2.5">المبلغ المسدد</th>
+                      <th className="p-2.5">التاريخ</th>
+                      <th className="p-2.5">المبلغ المطفي</th>
+                      <th className="p-2.5">الخصم المكتسب</th>
+                      <th className="p-2.5">المدفوع نقداً</th>
                       <th className="p-2.5">طريقة الدفع</th>
-                      <th className="p-2.5">رقم السند/الوصل</th>
+                      <th className="p-2.5">رقم الوصل</th>
                       <th className="p-2.5">ملاحظات</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {ledgerData?.payments?.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="p-6 text-center text-slate-400 font-bold">
-                          لا توجد دفعات مسددة مسجلة بعد.
+                        <td colSpan={7} className="p-6 text-center text-slate-400 font-bold">
+                          لا توجد دفعات
                         </td>
                       </tr>
                     ) : (
@@ -830,11 +992,24 @@ export const SuppliersDebtView: React.FC = () => {
                           <td className="p-2.5 font-mono font-bold text-slate-800">
                             {new Date(pay.paymentDate).toLocaleDateString('ar-IQ')}
                           </td>
-                          <td className="p-2.5 font-black font-mono text-emerald-700 text-sm">
+                          <td className="p-2.5 font-black font-mono text-slate-900 text-sm">
                             {Number(pay.amount).toLocaleString()} د.ع
                           </td>
+                          <td className="p-2.5">
+                            {Number(pay.discountAmount || 0) > 0 ? (
+                              <span className="inline-flex items-center gap-1 text-amber-800 font-bold bg-amber-50 border border-amber-200 px-2 py-0.5 rounded text-[11px] font-mono">
+                                <span>{Number(pay.discountAmount).toLocaleString()} د.ع</span>
+                                {pay.discountPercent > 0 && <span className="text-[10px] text-amber-700">({pay.discountPercent}%)</span>}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 font-mono">—</span>
+                            )}
+                          </td>
+                          <td className="p-2.5 font-black font-mono text-emerald-700 text-sm">
+                            {Number(pay.netPaidAmount || pay.amount).toLocaleString()} د.ع
+                          </td>
                           <td className="p-2.5 text-slate-600">
-                            {pay.paymentMethod === 'CASH' ? 'نقداً كاش' : pay.paymentMethod}
+                            {pay.paymentMethod === 'CASH' ? 'نقداً' : pay.paymentMethod}
                           </td>
                           <td className="p-2.5 font-mono text-indigo-700 font-bold">
                             {pay.receiptNumber || '—'}
@@ -855,7 +1030,7 @@ export const SuppliersDebtView: React.FC = () => {
                 onClick={() => setLedgerSupplier(null)}
                 className="px-5 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold cursor-pointer"
               >
-                إغلاق الكشف
+                إغلاق
               </button>
             </div>
           </div>

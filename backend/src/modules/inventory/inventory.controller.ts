@@ -123,6 +123,11 @@ export class InventoryController {
     return this.inventoryService.returnBatchToSupplier(batchId, dto);
   }
 
+  @Get('medicine-last-history/:medicineId')
+  async getMedicineLastHistory(@Param('medicineId') medicineId: string) {
+    return this.inventoryService.getMedicineLastHistory(medicineId);
+  }
+
   @Get(':id/batches')
   async getItemBatches(@Param('id') id: string) {
     return this.inventoryService.getItemBatches(id);

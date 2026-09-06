@@ -25,6 +25,7 @@ import { BatchTraceabilityModal } from '../components/BatchTraceabilityModal';
 import { SupplierReturnModal } from '../components/SupplierReturnModal';
 import { SmartSearchModal } from '../components/SmartSearchModal';
 import { AddUnregisteredMedicineModal } from '../components/AddUnregisteredMedicineModal';
+import { SmartExpiryInput } from '../components/SmartExpiryInput';
 import {
   getLocalInventory,
   saveLocalInventoryBulk,
@@ -142,37 +143,40 @@ export const InventoryView: React.FC = () => {
       }
 
       if (navigator.onLine) {
-        const queryParams = new URLSearchParams();
-        if (searchTerm.trim()) queryParams.append('search', searchTerm.trim());
-        if (selectedSupplierId) queryParams.append('supplierId', selectedSupplierId);
-        if (shelfFilter.trim()) queryParams.append('shelfLocation', shelfFilter.trim());
+        try {
+          const queryParams = new URLSearchParams();
+          if (searchTerm.trim()) queryParams.append('search', searchTerm.trim());
+          if (selectedSupplierId) queryParams.append('supplierId', selectedSupplierId);
+          if (shelfFilter.trim()) queryParams.append('shelfLocation', shelfFilter.trim());
 
-        const serverItems = await apiRequest<any[]>(`/inventory?${queryParams.toString()}`);
-        if (serverItems) {
-          setItems(serverItems);
-          if (!searchTerm && !selectedSupplierId && !shelfFilter) {
-            setTotalCount(serverItems.length);
-            const low = serverItems.filter(it => (it.totalUnitsRemaining || 0) <= (it.minAlertUnits || 5)).length;
-            setLowStockCount(low);
-            saveLocalInventoryBulk(serverItems).catch(console.error);
-          }
+          const serverItems = await apiRequest<any[]>(`/inventory?${queryParams.toString()}`);
+          if (serverItems) {
+            setItems(serverItems);
+            if (!searchTerm && !selectedSupplierId && !shelfFilter) {
+              setTotalCount(serverItems.length);
+              const low = serverItems.filter(it => (it.totalUnitsRemaining || 0) <= (it.minAlertUnits || 5)).length;
+              setLowStockCount(low);
+              saveLocalInventoryBulk(serverItems).catch(console.error);
+            }
 
-          // If no local items match, automatically search the 28,500 Master Catalog by barcode or name
-          if (serverItems.length === 0 && searchTerm.trim().length >= 2) {
-            try {
-              const catMeds = await apiRequest<any[]>(`/medicines/search?q=${encodeURIComponent(searchTerm.trim())}`);
-              setCatalogResults(catMeds || []);
-            } catch {
+            // If no local items match, automatically search the 28,500 Master Catalog by barcode or name
+            if (serverItems.length === 0 && searchTerm.trim().length >= 2) {
+              try {
+                const catMeds = await apiRequest<any[]>(`/medicines/search?q=${encodeURIComponent(searchTerm.trim())}`);
+                setCatalogResults(catMeds || []);
+              } catch {
+                setCatalogResults([]);
+              }
+            } else {
               setCatalogResults([]);
             }
-          } else {
-            setCatalogResults([]);
           }
+        } catch (serverErr) {
+          console.warn('Server inventory fetch unavailable, operating on local data', serverErr);
         }
       }
     } catch (err: any) {
-      console.error('Fetch inventory error:', err);
-      setMessage({ type: 'error', text: 'فشل تحميل بيانات المخزون' });
+      console.warn('Fetch inventory error:', err);
     } finally {
       setLoading(false);
     }
@@ -187,10 +191,14 @@ export const InventoryView: React.FC = () => {
       }
 
       if (navigator.onLine) {
-        const serverSups = await apiRequest<any[]>('/inventory/suppliers');
-        if (serverSups) {
-          setSuppliers(serverSups);
-          saveLocalSuppliers(serverSups).catch(console.error);
+        try {
+          const serverSups = await apiRequest<any[]>('/inventory/suppliers');
+          if (serverSups) {
+            setSuppliers(serverSups);
+            saveLocalSuppliers(serverSups).catch(console.error);
+          }
+        } catch (supErr) {
+          console.warn('Server suppliers fetch unavailable, operating on local data', supErr);
         }
       }
     } catch (err) {
@@ -205,7 +213,7 @@ export const InventoryView: React.FC = () => {
       const data = await apiRequest<any>('/inventory/smart-expiry-summary');
       setSmartExpiryData(data);
     } catch (err: any) {
-      console.error(err);
+      console.warn('Smart expiry summary unavailable offline:', err);
     } finally {
       setLoadingSmartExpiry(false);
     }
@@ -231,19 +239,35 @@ export const InventoryView: React.FC = () => {
     fetchSmartExpiry();
   });
 
-  const handleOpenQuickAdd = (med: any) => {
+  const handleOpenQuickAdd = async (med: any) => {
     setQuickAddMed(med);
     const units = Number(med.defaultUnitsPerPack) || 1;
+    const currentYear = new Date().getFullYear();
+
+    let history: any = null;
+    try {
+      const lookupKey = med.id || med.barcode;
+      history = await apiRequest<any>(`/inventory/medicine-last-history/${encodeURIComponent(lookupKey)}`);
+    } catch (e) {}
+
+    const defaultUnits = Number(history?.unitsPerPack || units);
+    const purchasePrice = Number(history?.purchasePricePack || med.defaultPurchasePrice || 0);
+    const sellingPack = Number(history?.sellingPricePack || 0);
+    let sellingUnit = Number(history?.sellingPriceUnit || 0);
+    if (sellingUnit === 0 && sellingPack > 0 && defaultUnits > 0) {
+      sellingUnit = Math.round(sellingPack / defaultUnits);
+    }
+
     setQuickAddForm({
-      sellingPricePack: 0,
-      sellingPriceUnit: 0,
-      purchasePricePack: 0,
+      sellingPricePack: sellingPack,
+      sellingPriceUnit: sellingUnit,
+      purchasePricePack: purchasePrice,
       quantityPacks: 10,
-      unitsPerPack: units,
-      shelfLocation: '',
+      unitsPerPack: defaultUnits,
+      shelfLocation: history?.shelfLocation || '',
       batchNumber: 'BATCH-01',
-      expiryMonth: 12,
-      expiryYear: new Date().getFullYear() + 2,
+      expiryMonth: history?.expiryMonth || 12,
+      expiryYear: history?.expiryYear || currentYear + 2,
     });
   };
 
@@ -267,6 +291,7 @@ export const InventoryView: React.FC = () => {
               expiryMonth: Number(quickAddForm.expiryMonth) || 12,
               expiryYear: Number(quickAddForm.expiryYear) || (new Date().getFullYear() + 2),
               batchNumber: quickAddForm.batchNumber?.trim() || 'BATCH-01',
+              shelfLocation: quickAddForm.shelfLocation?.trim() || undefined,
             },
           ],
         }),
@@ -364,7 +389,7 @@ export const InventoryView: React.FC = () => {
             }`}
           >
             <Package className="w-4 h-4" />
-            <span>المخزون والباركود (Inventory)</span>
+            <span>المخزن</span>
             <span className="px-1.5 py-0.5 bg-white/20 rounded-md text-[10px]">{totalCount}</span>
           </button>
 
@@ -380,7 +405,7 @@ export const InventoryView: React.FC = () => {
             }`}
           >
             <Clock className="w-4 h-4 text-amber-300" />
-            <span>🚨 إدارة الصلاحية والإرجاع للمذاخر (Smart Expiry)</span>
+            <span>الصلاحيات والإرجاع</span>
             {smartExpiryData?.summary?.totalBatchesAtRisk > 0 && (
               <span className="px-1.5 py-0.5 bg-rose-500 text-white rounded-full text-[10px] font-mono font-bold">
                 {smartExpiryData.summary.totalBatchesAtRisk}
@@ -397,7 +422,7 @@ export const InventoryView: React.FC = () => {
             }`}
           >
             <Layers className="w-4 h-4" />
-            <span>🔍 تتبع مسار الوجبات وسحب التشغيلات (Trace & Recall)</span>
+            <span>تتبع الوجبات</span>
           </button>
         </div>
 
@@ -444,14 +469,14 @@ export const InventoryView: React.FC = () => {
               }`}
             >
               <div className="flex items-center justify-between">
-                <div className="font-bold text-xs opacity-90">إجمالي المواد</div>
+                <div className="font-bold text-xs opacity-90">كل المواد</div>
                 <Package className="w-5 h-5 opacity-80" />
               </div>
               <div className="text-xl font-black mt-1.5 font-mono">
                 {totalCount} <span className="text-xs font-normal">مادة</span>
               </div>
               <div className="mt-1 text-[11px] opacity-75">
-                {activeFilter === 'ALL' ? '● جميع المواد' : 'عرض الكل'}
+                {activeFilter === 'ALL' ? '● الكل' : 'عرض الكل'}
               </div>
             </button>
 
@@ -475,10 +500,10 @@ export const InventoryView: React.FC = () => {
                 {activeFilter === 'LOW_STOCK' ? (
                   <span className="text-amber-900 font-bold bg-amber-200/70 px-2 py-0.5 rounded-full inline-flex items-center gap-1">
                     <Filter className="w-3 h-3" />
-                    النواقص فقط
+                    النواقص
                   </span>
                 ) : (
-                  'فلترة النواقص'
+                  'النواقص'
                 )}
               </div>
             </button>
@@ -493,17 +518,17 @@ export const InventoryView: React.FC = () => {
               }`}
             >
               <div className="flex items-center justify-between">
-                <div className="font-bold text-xs">أدوية قريبة الانتهاء</div>
+                <div className="font-bold text-xs">قريبة الانتهاء</div>
                 <Clock className="w-5 h-5 text-rose-700" />
               </div>
               <div className="text-xl font-black mt-1.5 text-rose-950 font-mono">
-                {expiringCount} <span className="text-xs font-normal">تشغيلة</span>
+                {expiringCount} <span className="text-xs font-normal">وجبة</span>
               </div>
               <div className="mt-1 text-[11px] text-rose-800">
                 {activeFilter === 'EXPIRING_SOON' ? (
                   <span className="text-rose-900 font-bold bg-rose-200/70 px-2 py-0.5 rounded-full inline-flex items-center gap-1">
                     <Filter className="w-3 h-3" />
-                    قريبة الانتهاء فقط
+                    قريبة الانتهاء
                   </span>
                 ) : (
                   'أقل من 3 أشهر'
@@ -521,7 +546,7 @@ export const InventoryView: React.FC = () => {
                   type="text"
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="ابحث بالاسم التجاري، العلمي، أو الباركود..."
+                  placeholder="بحث بالاسم أو الباركود..."
                   className="w-full pl-3 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 placeholder-slate-400 focus:border-indigo-600 focus:bg-white focus:outline-hidden"
                 />
               </div>
@@ -534,7 +559,7 @@ export const InventoryView: React.FC = () => {
                   setShowSmartSearch(true);
                 }}
                 className="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-xl text-xs font-black flex items-center gap-1 shrink-0 cursor-pointer active:scale-95 shadow-2xs"
-                title="البحث الصوتي الذكي (Voice AI)"
+                title="البحث الصوتي"
               >
                 <Mic className="w-4 h-4 text-rose-600 animate-pulse" />
                 <span className="hidden sm:inline">صوتي 🎙️</span>
@@ -548,10 +573,10 @@ export const InventoryView: React.FC = () => {
                   setShowSmartSearch(true);
                 }}
                 className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-black flex items-center gap-1 shrink-0 cursor-pointer active:scale-95 shadow-2xs"
-                title="البحث باللغة الطبيعية والبدائل (AI Co-Pilot)"
+                title="مساعد ذكي"
               >
                 <Sparkles className="w-4 h-4 text-indigo-600" />
-                <span className="hidden md:inline">مساعد ذكي 🧠</span>
+                <span className="hidden md:inline">مساعد ذكي</span>
               </button>
 
               {/* Add New Unregistered Medicine Button */}
@@ -559,10 +584,10 @@ export const InventoryView: React.FC = () => {
                 type="button"
                 onClick={() => setShowAddMedModal(true)}
                 className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center gap-1 shrink-0 cursor-pointer active:scale-95 shadow-xs"
-                title="تسجيل دواء جديد غير موجود في الدليل الموحد"
+                title="إضافة دواء جديد"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">تسجيل دواء جديد ➕</span>
+                <span className="hidden sm:inline">دواء جديد +</span>
               </button>
             </div>
 
@@ -573,7 +598,7 @@ export const InventoryView: React.FC = () => {
                   type="text"
                   value={shelfFilter}
                   onChange={(e) => setShelfFilter(e.target.value)}
-                  placeholder="تصفية حسب الرف (مثال: A-01)..."
+                  placeholder="الرف..."
                   className="w-full md:w-44 text-xs font-bold text-slate-800 placeholder:text-slate-400 bg-transparent focus:outline-hidden"
                 />
                 {shelfFilter && (
@@ -594,7 +619,7 @@ export const InventoryView: React.FC = () => {
                   onChange={(e) => setSelectedSupplierId(e.target.value)}
                   className="w-full md:w-56 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:border-indigo-600 focus:bg-white focus:outline-hidden"
                 >
-                  <option value="">جميع المذاخر والموردين</option>
+                  <option value="">كل المذاخر</option>
                   {suppliers.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name}
@@ -686,12 +711,12 @@ export const InventoryView: React.FC = () => {
               <table className="w-full text-right text-xs">
                 <thead className="bg-slate-50 text-[11px] text-slate-500 font-black uppercase tracking-wider border-b border-slate-100">
                   <tr>
-                    <th className="p-4">الدواء وموقع الرف 📍</th>
+                    <th className="p-4">الدواء والرف</th>
                     <th className="p-4">الباركود</th>
-                    <th className="p-4">الرصيد الكلي</th>
-                    <th className="p-4">سعر البيع (باكيت / شريط)</th>
-                    <th className="p-4">التشغيلات والوجبات (Batches)</th>
-                    <th className="p-4 text-center">الإجراءات</th>
+                    <th className="p-4">الرصيد</th>
+                    <th className="p-4">سعر البيع</th>
+                    <th className="p-4">الوجبات</th>
+                    <th className="p-4 text-center">إجراءات</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -699,14 +724,14 @@ export const InventoryView: React.FC = () => {
                     <tr>
                       <td colSpan={6} className="p-12 text-center text-slate-400">
                         <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-                        جاري تحميل بيانات المخزون...
+                        جاري التحميل...
                       </td>
                     </tr>
                   ) : items.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="p-12 text-center text-slate-400">
                         <Package className="w-12 h-12 stroke-1 text-slate-300 mx-auto mb-2" />
-                        لا توجد أدوية مطابقة للبحث
+                        لا توجد نتائج
                       </td>
                     </tr>
                   ) : (
@@ -754,17 +779,33 @@ export const InventoryView: React.FC = () => {
 
                         {/* Quantity */}
                         <td className="p-4">
-                          <div className="space-y-0.5 font-mono">
-                            <b className="text-slate-900 font-black text-sm">
-                              {Math.floor((item.totalUnitsRemaining || 0) / (item.unitsPerPack || 1))}
-                            </b>{' '}
-                            <span className="text-[11px] text-slate-500">علبة</span>
-                            {(item.totalUnitsRemaining || 0) % (item.unitsPerPack || 1) > 0 && (
-                              <span className="text-[11px] text-indigo-600 font-bold block">
-                                + {(item.totalUnitsRemaining || 0) % (item.unitsPerPack || 1)} شريط
+                          {Number(item.validUnitsRemaining ?? (item.activeBatches?.length ? item.totalUnitsRemaining : 0)) === 0 && Number(item.expiredUnitsRemaining || 0) > 0 ? (
+                            <div className="space-y-1">
+                              <span className="text-xs font-black text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-lg inline-block font-mono">
+                                0 علبة صالحة
                               </span>
-                            )}
-                          </div>
+                              <span className="text-[10px] text-rose-600 font-bold block">
+                                ⚠️ {Math.floor(Number(item.expiredUnitsRemaining) / (item.unitsPerPack || 1))} علبة منتهية
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5 font-mono">
+                              <b className="text-slate-900 font-black text-sm">
+                                {Math.floor((item.validUnitsRemaining ?? item.totalUnitsRemaining ?? 0) / (item.unitsPerPack || 1))}
+                              </b>{' '}
+                              <span className="text-[11px] text-slate-500">علبة</span>
+                              {(item.validUnitsRemaining ?? item.totalUnitsRemaining ?? 0) % (item.unitsPerPack || 1) > 0 && (
+                                <span className="text-[11px] text-indigo-600 font-bold block">
+                                  + {(item.validUnitsRemaining ?? item.totalUnitsRemaining ?? 0) % (item.unitsPerPack || 1)} شريط
+                                </span>
+                              )}
+                              {Number(item.expiredUnitsRemaining || 0) > 0 && (
+                                <span className="text-[10px] text-rose-600 font-bold block">
+                                  ({Math.floor(Number(item.expiredUnitsRemaining) / (item.unitsPerPack || 1))} منتهية)
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
 
                         {/* Prices */}
@@ -795,6 +836,10 @@ export const InventoryView: React.FC = () => {
                                   #{b.batchNumber} {b.expiryFormatted && `(${b.expiryFormatted})`}
                                 </button>
                               ))
+                            ) : Number(item.expiredUnitsRemaining || 0) > 0 ? (
+                              <span className="text-[10px] text-rose-600 font-bold bg-rose-50 px-2 py-0.5 rounded-lg border border-rose-200">
+                                ⚠️ وجبة منتهية الصلاحية
+                              </span>
                             ) : (
                               <span className="text-[10px] text-slate-400">لا توجد وجبات نشطة</span>
                             )}
@@ -1462,6 +1507,11 @@ export const InventoryView: React.FC = () => {
                             ⛔ مسحوبة
                           </span>
                         )}
+                        {(b.isExpired || new Date(b.expiryDate) < new Date()) && (
+                          <span className="px-2 py-0.5 bg-rose-100 text-rose-700 border border-rose-200 rounded-md text-[10px] font-black">
+                            ⚠️ منتهية الصلاحية
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-3 text-[11px] text-slate-500">
                         <span>الصلاحية: <b className="text-slate-800 font-mono">{new Date(b.expiryDate).toLocaleDateString('ar-IQ')}</b></span>
@@ -1665,40 +1715,17 @@ export const InventoryView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">شهر الصلاحية (MM)</label>
-                  <select
-                    value={quickAddForm.expiryMonth}
-                    onChange={(e) =>
-                      setQuickAddForm((prev) => ({ ...prev, expiryMonth: Number(e.target.value) || 12 }))
-                    }
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-900 focus:bg-white focus:border-indigo-600 focus:outline-hidden"
-                  >
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                      <option key={m} value={m}>
-                        {m < 10 ? `0${m}` : m}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">سنة الصلاحية (YYYY)</label>
-                  <input
-                    type="number"
-                    min={new Date().getFullYear()}
-                    max={new Date().getFullYear() + 10}
-                    value={quickAddForm.expiryYear}
-                    onChange={(e) =>
-                      setQuickAddForm((prev) => ({
-                        ...prev,
-                        expiryYear: Number(e.target.value) || new Date().getFullYear() + 2,
-                      }))
-                    }
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-900 focus:bg-white focus:border-indigo-600 focus:outline-hidden"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  شهر / سنة الصلاحية (1-12 و 20XX)
+                </label>
+                <SmartExpiryInput
+                  month={quickAddForm.expiryMonth}
+                  year={quickAddForm.expiryYear}
+                  onChange={(m, y) =>
+                    setQuickAddForm((prev) => ({ ...prev, expiryMonth: m, expiryYear: y }))
+                  }
+                />
               </div>
 
               <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">

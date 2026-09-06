@@ -188,8 +188,23 @@ export class UpdateSupplierDto {
 
 export class RecordSupplierPaymentDto {
   @IsNumber()
-  @Min(250, { message: 'أقل مبلغ دفعة هو 250 د.ع' })
+  @Min(0, { message: 'مبلغ الدفعة لا يمكن أن يكون سالباً' })
   amount: number;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  discountPercent?: number;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  discountAmount?: number;
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  netPaidAmount?: number;
 
   @IsString()
   @IsOptional()

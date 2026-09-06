@@ -194,6 +194,9 @@ END $$;`;
       earlyDiscountAmount = Math.round(totalAmount * (earlyDiscountPercent / 100));
     }
 
+    const totalGrossAmount = dto.items.reduce((sum: number, it: any) => sum + (Number(it.quantityPacks) || 0) * (Number(it.purchasePricePack) || 0), 0);
+    const totalDiscountAmount = Math.max(0, totalGrossAmount - totalAmount);
+
     // 1. Insert into purchases table (standard unified system)
     await this.prisma.$executeRawUnsafe(`
       INSERT INTO "${schema}"."purchases" (
@@ -201,13 +204,15 @@ END $$;`;
         "total_gross_amount", "total_discount_amount", "net_total_amount",
         "paid_amount", "remaining_amount", "payment_status", "notes", "created_at"
       ) VALUES (
-        $1::uuid, $2, $3::uuid, $4, $5, 0, $5, $6, $7, $8, $9, $10
+        $1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12
       );
     `,
       purchaseId,
       invoiceNumber,
       finalSupplierId,
       supplierName,
+      totalGrossAmount,
+      totalDiscountAmount,
       totalAmount,
       paidAmount,
       remainingAmount,
@@ -262,7 +267,11 @@ END $$;`;
       const sellingPricePack = Number(item.sellingPricePack) || 0;
       const sellingPriceUnit = unitsPerPack > 0 ? (sellingPricePack / unitsPerPack) : sellingPricePack;
       const totalCost = quantityPacks * netCostPack;
-      const totalUnits = Math.round((quantityPacks + bonusPacks) * unitsPerPack);
+      const totalPacks = quantityPacks + bonusPacks;
+      const effectiveNetCostPack = totalPacks > 0
+        ? Number((totalCost / totalPacks).toFixed(2))
+        : netCostPack;
+      const totalUnits = Math.round(totalPacks * unitsPerPack);
 
       let expiryDate: Date | null = null;
       if (item.expiryDate && String(item.expiryDate).trim() && String(item.expiryDate).trim() !== 'null') {
@@ -278,6 +287,16 @@ END $$;`;
 
       // Ensure medicine exists in public.medicines
       let medicineId = item.medicineId;
+      if (medicineId) {
+        const check = await this.prisma.$queryRawUnsafe<any[]>(
+          `SELECT id FROM public.medicines WHERE id = $1::uuid LIMIT 1;`,
+          medicineId,
+        );
+        if (check.length === 0) {
+          medicineId = undefined;
+        }
+      }
+
       if (!medicineId) {
         const existingMed: any[] = await this.prisma.$queryRawUnsafe(`
           SELECT id FROM public.medicines 
@@ -310,12 +329,52 @@ END $$;`;
 
       // Find or create InventoryItem in Tenant schema
       let inventoryItem = (
-        await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(`
-          SELECT id FROM "${schema}"."inventory_items" WHERE "medicine_id" = $1::uuid LIMIT 1;
+        await this.prisma.$queryRawUnsafe<Array<{
+          id: string;
+          units_per_pack: number;
+          selling_price_pack: number;
+          selling_price_unit: number;
+          shelf_location: string | null;
+        }>>(`
+          SELECT id, units_per_pack, selling_price_pack, selling_price_unit, shelf_location 
+          FROM "${schema}"."inventory_items" 
+          WHERE "medicine_id" = $1::uuid LIMIT 1;
         `, medicineId)
       )[0];
 
       let inventoryItemId: string;
+
+      // Resolve autofill values from previous pharmacy records if not passed or 0
+      const resolvedUnits = Number(
+        unitsPerPack > 1 ? unitsPerPack : inventoryItem?.units_per_pack || 1,
+      );
+      const resolvedSellingPack = Number(
+        sellingPricePack > 0 ? sellingPricePack : inventoryItem?.selling_price_pack || 0,
+      );
+      let resolvedSellingUnit = Number(
+        sellingPriceUnit > 0 ? sellingPriceUnit : inventoryItem?.selling_price_unit || 0,
+      );
+      if (resolvedSellingUnit <= 0 && resolvedSellingPack > 0 && resolvedUnits > 0) {
+        resolvedSellingUnit = Math.round(resolvedSellingPack / resolvedUnits);
+      }
+      const resolvedShelf =
+        item.shelfLocation && item.shelfLocation.trim().length > 0
+          ? item.shelfLocation.trim()
+          : inventoryItem?.shelf_location || null;
+
+      let resolvedExpiryDate: Date | null = expiryDate;
+      if (!resolvedExpiryDate && inventoryItem) {
+        try {
+          const lastBatches = await this.prisma.$queryRawUnsafe<Array<{ expiry_date: Date }>>(`
+            SELECT expiry_date FROM "${schema}"."inventory_batches"
+            WHERE inventory_item_id = $1::uuid
+            ORDER BY created_at DESC LIMIT 1;
+          `, inventoryItem.id);
+          if (lastBatches.length > 0 && lastBatches[0].expiry_date) {
+            resolvedExpiryDate = new Date(lastBatches[0].expiry_date);
+          }
+        } catch {}
+      }
 
       if (!inventoryItem) {
         const createdInv = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(`
@@ -324,21 +383,24 @@ END $$;`;
           ) VALUES (
             $1::uuid, $2, $3, $4, $5, 5, true, $6
           ) RETURNING id;
-        `, medicineId, finalTradeName, unitsPerPack, sellingPricePack, sellingPriceUnit, item.shelfLocation?.trim() || null);
+        `, medicineId, finalTradeName, resolvedUnits, resolvedSellingPack, resolvedSellingUnit, resolvedShelf);
         inventoryItemId = createdInv[0].id;
       } else {
         inventoryItemId = inventoryItem.id;
-        // Update price and shelf
+        // Update price, units, and shelf
         await this.prisma.$executeRawUnsafe(`
           UPDATE "${schema}"."inventory_items"
           SET "selling_price_pack" = CASE WHEN $1 > 0 THEN $1 ELSE "selling_price_pack" END,
               "selling_price_unit" = CASE WHEN $2 > 0 THEN $2 ELSE "selling_price_unit" END,
-              "custom_name" = COALESCE($3, "custom_name"),
-              "shelf_location" = COALESCE($4, "shelf_location"),
+              "units_per_pack" = CASE WHEN $3 > 1 THEN $3 ELSE "units_per_pack" END,
+              "custom_name" = COALESCE($4, "custom_name"),
+              "shelf_location" = COALESCE($5, "shelf_location"),
               "updated_at" = CURRENT_TIMESTAMP
-          WHERE "id" = $5::uuid;
-        `, sellingPricePack, sellingPriceUnit, finalTradeName, item.shelfLocation?.trim() || null, inventoryItemId);
+          WHERE "id" = $6::uuid;
+        `, resolvedSellingPack, resolvedSellingUnit, resolvedUnits, finalTradeName, resolvedShelf, inventoryItemId);
       }
+
+      const totalBatchUnits = (quantityPacks + bonusPacks) * resolvedUnits;
 
       // Insert into purchase_items
       await this.prisma.$executeRawUnsafe(`
@@ -354,13 +416,13 @@ END $$;`;
         inventoryItemId,
         quantityPacks,
         bonusPacks,
-        unitsPerPack,
+        resolvedUnits,
         purchasePricePack,
         discountPercent,
         netCostPack,
-        sellingPricePack,
-        sellingPriceUnit,
-        expiryDate,
+        resolvedSellingPack,
+        resolvedSellingUnit,
+        resolvedExpiryDate,
         batchNumber
       );
 
@@ -379,13 +441,13 @@ END $$;`;
         finalTradeName,
         item.scientificName || null,
         batchNumber,
-        expiryDate,
+        resolvedExpiryDate,
         quantityPacks,
         bonusPacks,
-        unitsPerPack,
+        resolvedUnits,
         purchasePricePack,
         discountPercent,
-        sellingPricePack,
+        resolvedSellingPack,
         totalCost
       );
 
@@ -402,11 +464,11 @@ END $$;`;
         finalSupplierId,
         purchaseId,
         batchNumber,
-        purchasePricePack,
-        sellingPricePack,
-        sellingPriceUnit,
-        totalUnits,
-        expiryDate
+        effectiveNetCostPack,
+        resolvedSellingPack,
+        resolvedSellingUnit,
+        totalBatchUnits,
+        resolvedExpiryDate
       );
     }
 
@@ -465,9 +527,9 @@ END $$;`;
         pi.supplier_id as "supplierId",
         pi.supplier_name as "supplierName",
         pi.invoice_date as "invoiceDate",
-        pi.total_amount as "totalAmount",
-        pi.paid_amount as "paidAmount",
-        pi.remaining_amount as "remainingAmount",
+        COALESCE(p.net_total_amount, pi.total_amount) as "totalAmount",
+        COALESCE(p.paid_amount, pi.paid_amount) as "paidAmount",
+        COALESCE(p.remaining_amount, pi.remaining_amount) as "remainingAmount",
         pi.notes,
         pi.items_count as "itemsCount",
         pi.early_discount_days as "earlyDiscountDays",
@@ -478,6 +540,7 @@ END $$;`;
         pi.early_discount_applied_amount as "earlyDiscountAppliedAmount",
         pi.created_at as "createdAt"
       FROM "${schema}"."purchase_invoices" pi
+      LEFT JOIN "${schema}"."purchases" p ON pi.id = p.id
     `;
 
     const params: any[] = [];
@@ -510,9 +573,9 @@ END $$;`;
         pi.supplier_id as "supplierId",
         pi.supplier_name as "supplierName",
         pi.invoice_date as "invoiceDate",
-        pi.total_amount as "totalAmount",
-        pi.paid_amount as "paidAmount",
-        pi.remaining_amount as "remainingAmount",
+        COALESCE(p.net_total_amount, pi.total_amount) as "totalAmount",
+        COALESCE(p.paid_amount, pi.paid_amount) as "paidAmount",
+        COALESCE(p.remaining_amount, pi.remaining_amount) as "remainingAmount",
         pi.notes,
         pi.items_count as "itemsCount",
         pi.early_discount_days as "earlyDiscountDays",
@@ -523,6 +586,7 @@ END $$;`;
         pi.early_discount_applied_amount as "earlyDiscountAppliedAmount",
         pi.created_at as "createdAt"
       FROM "${schema}"."purchase_invoices" pi
+      LEFT JOIN "${schema}"."purchases" p ON pi.id = p.id
       WHERE pi.id = $1::uuid;
     `, id);
 

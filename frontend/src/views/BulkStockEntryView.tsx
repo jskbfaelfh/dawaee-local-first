@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { roundTo250, calculateStripPrice } from '../utils/currency';
+import { SmartExpiryInput } from '../components/SmartExpiryInput';
 
 interface TableRowItem {
   tempId: string;
@@ -42,6 +43,8 @@ interface TableRowItem {
   expiryMonth: number;
   expiryYear: number;
   batchNumber?: string;
+  shelfLocation?: string;
+  hasPreviousBatch?: boolean;
 }
 
 export const BulkStockEntryView: React.FC = () => {
@@ -85,6 +88,7 @@ export const BulkStockEntryView: React.FC = () => {
     sellingPricePack: 0,
     expiryMonth: 12,
     expiryYear: new Date().getFullYear() + 2,
+    shelfLocation: '',
   });
 
   // Fetch saved suppliers list
@@ -117,32 +121,74 @@ export const BulkStockEntryView: React.FC = () => {
     }
   };
 
-  // Add selected medicine to grid
-  const addMedicineToGrid = (med: any) => {
-    const defaultUnits = med.defaultUnitsPerPack || 1;
+  // Add selected medicine to grid with auto-prefill from last pharmacy batch
+  const addMedicineToGrid = async (med: any) => {
     const currentYear = new Date().getFullYear();
+    const tempId = Math.random().toString();
+
+    // 1. Fetch previous batch history for this medicine in this pharmacy
+    let history: any = null;
+    try {
+      const lookupKey = med.id || med.barcode;
+      history = await apiRequest<any>(`/inventory/medicine-last-history/${encodeURIComponent(lookupKey)}`);
+    } catch (e) {
+      console.warn('Could not fetch medicine last history:', e);
+    }
+
+    const defaultUnits = Number(
+      history?.unitsPerPack || med.defaultUnitsPerPack || med.unitsPerPack || 1,
+    );
+    const purchasePricePack = Number(
+      history?.purchasePricePack || med.defaultPurchasePrice || 0,
+    );
+    const sellingPricePack = Number(history?.sellingPricePack || 0);
+    let sellingPriceUnit = Number(history?.sellingPriceUnit || 0);
+    if (sellingPriceUnit === 0 && sellingPricePack > 0 && defaultUnits > 0) {
+      sellingPriceUnit = calculateStripPrice(sellingPricePack, defaultUnits);
+    }
+
+    const bonusPacks = Number(history?.bonusPacks || 0);
+    const shelfLocation = history?.shelfLocation || '';
+    const expiryMonth = Number(history?.expiryMonth || 12);
+    const expiryYear = Number(history?.expiryYear || currentYear + 2);
+    const hasPreviousBatch = !!history?.hasPreviousBatch;
 
     const newRow: TableRowItem = {
-      tempId: Math.random().toString(),
+      tempId,
       medicineId: med.id,
-      customName: '',
+      customName:
+        history?.tradeName && history.tradeName !== med.tradeName ? history.tradeName : '',
       tradeName: med.tradeName,
-      scientificName: med.scientificName,
+      scientificName: med.scientificName || '',
+      dosageForm: med.dosageForm,
+      strength: med.strength,
+      barcode: med.barcode,
       unitsPerPack: defaultUnits,
       quantityPacks: 10,
-      bonusPacks: 0,
+      bonusPacks,
       discountPercent: 0,
-      purchasePricePack: 0,
-      sellingPricePack: 0,
-      sellingPriceUnit: 0,
-      expiryMonth: 12,
-      expiryYear: currentYear + 2,
+      purchasePricePack,
+      sellingPricePack,
+      sellingPriceUnit,
+      expiryMonth,
+      expiryYear,
       batchNumber: '',
+      shelfLocation,
+      hasPreviousBatch,
     };
 
     setItems((prev) => [newRow, ...prev]);
     setSearchTerm('');
     setSearchResults([]);
+
+    // Auto-focus on the first field (Quantity) of the newly added row
+    setTimeout(() => {
+      const firstInput = document.getElementById(`input-qty-0`);
+      if (firstInput) {
+        firstInput.focus();
+        (firstInput as HTMLInputElement).select?.();
+      }
+    }, 50);
   };
 
   // Update specific field in row
@@ -234,6 +280,7 @@ export const BulkStockEntryView: React.FC = () => {
       ),
       expiryMonth: Number(newMedForm.expiryMonth),
       expiryYear: Number(newMedForm.expiryYear),
+      shelfLocation: newMedForm.shelfLocation || '',
     };
 
     setItems((prev) => [newRow, ...prev]);
@@ -254,6 +301,7 @@ export const BulkStockEntryView: React.FC = () => {
       sellingPricePack: 0,
       expiryMonth: 12,
       expiryYear: new Date().getFullYear() + 2,
+      shelfLocation: '',
     });
   };
 
@@ -301,6 +349,7 @@ export const BulkStockEntryView: React.FC = () => {
           expiryMonth: Number(i.expiryMonth),
           expiryYear: Number(i.expiryYear),
           batchNumber: i.batchNumber || undefined,
+          shelfLocation: i.shelfLocation || undefined,
         })),
       };
 
@@ -553,7 +602,26 @@ export const BulkStockEntryView: React.FC = () => {
               type="text"
               value={searchTerm}
               onChange={(e) => handleSearch(e.target.value)}
-              placeholder="امسح الباركود أو اكتب اسم الدواء للبحث..."
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (searchResults.length > 0) {
+                    await addMedicineToGrid(searchResults[0]);
+                  } else if (searchTerm.trim().length > 0) {
+                    try {
+                      const directMatches = await apiRequest<any[]>(
+                        `/medicines/search?q=${encodeURIComponent(searchTerm.trim())}`,
+                      );
+                      if (directMatches && directMatches.length > 0) {
+                        await addMedicineToGrid(directMatches[0]);
+                      }
+                    } catch (err) {
+                      console.error(err);
+                    }
+                  }
+                }
+              }}
+              placeholder="امسح الباركود أو اكتب اسم الدواء ثم اضغط Enter..."
               className="w-full pr-11 pl-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 font-bold text-sm focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
             />
           </div>
@@ -616,7 +684,7 @@ export const BulkStockEntryView: React.FC = () => {
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>تسجيل كدواء جديد وإدراجه في الفاتورة 🚀</span>
+                  <span>دواء جديد +</span>
                 </button>
               </div>
             )}
@@ -649,8 +717,8 @@ export const BulkStockEntryView: React.FC = () => {
                     بونص
                   </span>
                 </th>
-                <th className="p-2.5 w-20 text-center">الأشرطة</th>
-                <th className="p-2.5 w-28">سعر الشراء</th>
+                <th className="p-2.5 w-20 text-center">الشريط/علبة</th>
+                <th className="p-2.5 w-28">شراء الباكيت</th>
                 <th className="p-2.5 w-20 text-center bg-rose-50/70 text-rose-900">
                   <span className="flex items-center justify-center gap-1">
                     <Percent className="w-3 h-3 text-rose-600" />
@@ -658,17 +726,18 @@ export const BulkStockEntryView: React.FC = () => {
                   </span>
                 </th>
                 <th className="p-2.5 w-28 bg-indigo-50/50 text-indigo-900">الكلفة</th>
-                <th className="p-2.5 w-28">بيع العلبة</th>
+                <th className="p-2.5 w-28">بيع الباكيت</th>
                 <th className="p-2.5 w-28">بيع الشريط</th>
                 <th className="p-2.5 w-32">الصلاحية</th>
-                <th className="p-2.5 w-24">رقم الوجبة</th>
+                <th className="p-2.5 w-24">الوجبة</th>
+                <th className="p-2.5 w-24">الرف</th>
                 <th className="p-2.5 w-10 text-center">حذف</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="p-10 text-center text-slate-400 font-bold">
+                  <td colSpan={14} className="p-10 text-center text-slate-400 font-bold">
                     <PackagePlus className="w-8 h-8 mx-auto mb-2 text-slate-300" />
                     لا توجد أدوية بعد.
                   </td>
@@ -693,6 +762,12 @@ export const BulkStockEntryView: React.FC = () => {
                       <td className="p-2.5">
                         <div className="font-bold text-slate-900 text-xs">{row.tradeName}</div>
                         <div className="text-[10px] text-slate-500 truncate max-w-[190px]">{row.scientificName}</div>
+                        {row.hasPreviousBatch && (
+                          <span className="inline-flex items-center gap-1 mt-0.5 px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[9px] font-bold">
+                            <Sparkles className="w-2.5 h-2.5 text-emerald-600" />
+                            مسترد من الوجبة السابقة
+                          </span>
+                        )}
                         {row.isNewMedicine && (
                           <span className="inline-block mt-0.5 px-1 py-0.2 bg-amber-50 text-amber-700 border border-amber-200 rounded text-[9px] font-bold">
                             دواء جديد كلياً
@@ -815,48 +890,58 @@ export const BulkStockEntryView: React.FC = () => {
                         />
                       </td>
 
-                      {/* Expiry Date */}
+                      {/* Expiry Date (Month 1-12 without zero, Year 20XX with Enter navigation) */}
                       <td className="p-2">
-                        <div className="flex items-center gap-1">
-                          <select
-                            id={`input-exp-month-${idx}`}
-                            value={row.expiryMonth}
-                            onChange={(e) => updateRowField(row.tempId, 'expiryMonth', Number(e.target.value))}
-                            onKeyDown={(e) => handleKeyDown(e, `input-exp-year-${idx}`)}
-                            className="w-14 px-1 py-1.5 bg-white border border-slate-300 rounded-md text-center font-bold text-xs"
-                          >
-                            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                              <option key={m} value={m}>
-                                {String(m).padStart(2, '0')}
-                              </option>
-                            ))}
-                          </select>
-                          <span className="text-slate-400">/</span>
-                          <input
-                            id={`input-exp-year-${idx}`}
-                            type="number"
-                            min="2024"
-                            max="2040"
-                            value={row.expiryYear}
-                            onChange={(e) => updateRowField(row.tempId, 'expiryYear', Number(e.target.value))}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                searchInputRef.current?.focus();
-                              }
-                            }}
-                            className="w-16 px-1 py-1.5 bg-white border border-slate-300 rounded-md text-center font-bold text-xs"
-                          />
-                        </div>
+                        <SmartExpiryInput
+                          month={row.expiryMonth}
+                          year={row.expiryYear}
+                          monthId={`input-exp-month-${idx}`}
+                          yearId={`input-exp-year-${idx}`}
+                          onChange={(m, y) => {
+                            updateRowField(row.tempId, 'expiryMonth', m);
+                            updateRowField(row.tempId, 'expiryYear', y);
+                          }}
+                          onNext={() => {
+                            const batchInput = document.getElementById(`input-batch-${idx}`);
+                            if (batchInput) {
+                              batchInput.focus();
+                              (batchInput as HTMLInputElement).select?.();
+                            } else {
+                              document.getElementById(`input-shelf-${idx}`)?.focus();
+                            }
+                          }}
+                        />
                       </td>
 
                       {/* Batch Number */}
                       <td className="p-2">
                         <input
+                          id={`input-batch-${idx}`}
                           type="text"
                           value={row.batchNumber || ''}
                           onChange={(e) => updateRowField(row.tempId, 'batchNumber', e.target.value)}
+                          onKeyDown={(e) => handleKeyDown(e, `input-shelf-${idx}`)}
                           placeholder="اختياري"
-                          className="w-full px-1.5 py-1.5 bg-white border border-slate-300 rounded-md text-center text-xs"
+                          className="w-full px-1.5 py-1.5 bg-white border border-slate-300 rounded-md text-center text-xs font-mono"
+                        />
+                      </td>
+
+                      {/* Shelf Location */}
+                      <td className="p-2">
+                        <input
+                          id={`input-shelf-${idx}`}
+                          type="text"
+                          value={row.shelfLocation || ''}
+                          onChange={(e) => updateRowField(row.tempId, 'shelfLocation', e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              searchInputRef.current?.focus();
+                              searchInputRef.current?.select();
+                            }
+                          }}
+                          placeholder="A-01"
+                          className="w-full px-1.5 py-1.5 bg-slate-50 border border-slate-300 rounded-md text-center text-xs font-bold font-mono text-slate-900 focus:bg-white focus:border-indigo-500"
                         />
                       </td>
 
@@ -1035,6 +1120,34 @@ export const BulkStockEntryView: React.FC = () => {
                     value={newMedForm.sellingPricePack}
                     onChange={(e) => setNewMedForm({ ...newMedForm, sellingPricePack: Number(e.target.value) })}
                     className="w-full px-3 py-2 border border-emerald-300 bg-emerald-50 text-emerald-950 rounded-lg text-sm font-bold"
+                  />
+                </div>
+              </div>
+
+              {/* Expiry & Shelf Location */}
+              <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    شهر / سنة الصلاحية (1-12 و 20XX)
+                  </label>
+                  <SmartExpiryInput
+                    month={newMedForm.expiryMonth}
+                    year={newMedForm.expiryYear}
+                    onChange={(m, y) =>
+                      setNewMedForm((prev) => ({ ...prev, expiryMonth: m, expiryYear: y }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">موقع الرف</label>
+                  <input
+                    type="text"
+                    value={newMedForm.shelfLocation}
+                    onChange={(e) =>
+                      setNewMedForm((prev) => ({ ...prev, shelfLocation: e.target.value }))
+                    }
+                    placeholder="مثال: A-01"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-bold font-mono text-slate-900"
                   />
                 </div>
               </div>

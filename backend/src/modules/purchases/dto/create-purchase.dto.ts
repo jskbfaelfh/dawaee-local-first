@@ -54,6 +54,11 @@ export class PurchaseItemDto {
   @Min(0)
   sellingPricePack!: number;
 
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  sellingPriceUnit?: number;
+
   @IsString()
   @IsOptional()
   shelfLocation?: string;

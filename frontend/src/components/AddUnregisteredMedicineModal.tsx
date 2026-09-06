@@ -121,8 +121,8 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
               <Pill className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-black text-base text-slate-900">تسجيل دواء جديد غير مسجل</h3>
-              <p className="text-[11px] text-slate-500 font-medium">إضافة بطاقة صنف جديد للدليل الموحد ومخزون الصيدلية</p>
+              <h3 className="font-black text-base text-slate-900">إضافة دواء جديد</h3>
+              <p className="text-[11px] text-slate-500 font-medium">إضافة بطاقة دواء للنظام</p>
             </div>
           </div>
           <button
@@ -144,7 +144,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
           {/* Trade Name */}
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1">
-              الاسم التجاري للدواء (Trade Name) *
+              الاسم التجاري *
             </label>
             <div className="relative">
               <Pill className="w-4 h-4 absolute right-3 top-3 text-slate-400" />
@@ -162,7 +162,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
           {/* Scientific Name */}
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
-              <span>الاسم العلمي / المادة الفعالة (Scientific Name) *</span>
+              <span>الاسم العلمي *</span>
               <span className="text-[10px] text-indigo-600 font-normal">مهم للبدائل</span>
             </label>
             <div className="relative">
@@ -172,7 +172,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
                 required
                 value={scientificName}
                 onChange={(e) => setScientificName(e.target.value)}
-                placeholder="مثال: Paracetamol + Sodium"
+                placeholder="مثال: Paracetamol"
                 className="w-full pr-9 pl-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
               />
             </div>
@@ -181,7 +181,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
           {/* Dosage Form with Quick Pills */}
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1">
-              الشكل الدوائي (Dosage Form)
+              الشكل الدوائي
             </label>
             <input
               type="text"
@@ -212,7 +212,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                التركيز والقوة (Strength)
+                التركيز
               </label>
               <input
                 type="text"
@@ -238,7 +238,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
                 <Layers className="w-3.5 h-3.5 text-indigo-600" />
-                <span>أشرطة / وحدات بالعلبة</span>
+                <span>الشريط بالعلبة</span>
               </label>
               <input
                 type="number"
@@ -249,9 +249,6 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
                 onChange={(e) => setDefaultUnitsPerPack(Math.max(1, Number(e.target.value)))}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-black text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-hidden"
               />
-              <span className="text-[10px] text-slate-400 mt-1 block">
-                1 = علبة مفردة (شراب/مرهم)، 2 أو 3 = عدد الأشرطة
-              </span>
             </div>
           </div>
 
@@ -260,7 +257,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
                 <Barcode className="w-3.5 h-3.5 text-indigo-600" />
-                الباركود الدولي (اختياري)
+                الباركود (اختياري)
               </label>
               <input
                 type="text"
@@ -306,7 +303,7 @@ export const AddUnregisteredMedicineModal: React.FC<AddUnregisteredMedicineModal
               className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-all"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>{loading ? 'جاري التسجيل...' : 'تسجيل وإدراج الدواء فوراً'}</span>
+              <span>{loading ? 'جاري الحفظ...' : 'حفظ الدواء'}</span>
             </button>
 
             <button

@@ -97,10 +97,10 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-base flex items-center gap-2">
-                <span>سند إرجاع دواء للمذخر (Return to Supplier)</span>
+                <span>إرجاع للمذخر</span>
               </h3>
               <p className="text-xs text-purple-200 font-medium">
-                إرجاع الأدوية المنتهية أو القريبة من الانتهاء وخصمها من الحساب
+                إرجاع بضاعة وخصمها من حساب المذخر
               </p>
             </div>
           </div>
@@ -236,7 +236,7 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    عدد العلب المراد إرجاعها (Packs to Return):
+                    عدد العلب *
                   </label>
                   <input
                     type="number"
@@ -248,13 +248,13 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
                     required
                   />
                   <span className="text-[10px] text-slate-400 mt-1 block">
-                    الحد الأقصى المتاح للإرجاع: {maxPacks} علبة
+                    الحد الأقصى: {maxPacks} علبة
                   </span>
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    سعر الشراء المسترد للعلبة (د.ع):
+                    سعر الاسترداد (د.ع) *
                   </label>
                   <input
                     type="number"
@@ -266,7 +266,7 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
                     required
                   />
                   <span className="text-[10px] text-slate-400 mt-1 block">
-                    سعر الشراء المسجل بالفاتورة الأصلية
+                    سعر الشراء الأصلي
                   </span>
                 </div>
               </div>
@@ -274,13 +274,13 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
               {/* Reason */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  سبب الإرجاع وملاحظات:
+                  سبب الإرجاع وملاحظات
                 </label>
                 <input
                   type="text"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
-                  placeholder="مثال: دواء منتهي الصلاحية أو تالف أو مرتجع حسب اتفاقية المذخر"
+                  placeholder="ملاحظات..."
                   className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 focus:border-purple-600 focus:outline-hidden"
                 />
               </div>
@@ -289,10 +289,10 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
               <label className="p-3 bg-purple-50/70 border border-purple-200 rounded-xl flex items-center justify-between cursor-pointer">
                 <div className="space-y-0.5">
                   <span className="text-xs font-bold text-purple-900 block">
-                    خصم القيمة تلقائياً من رصيد مديونية المذخر
+                    خصم من ديون المذخر
                   </span>
                   <p className="text-[10px] text-purple-700">
-                    سيتم تنزيل المبلغ فوراً من حساب المذخر في كشف الحساب والديون
+                    تنزيل المبلغ من كشف الحساب
                   </p>
                 </div>
                 <input
@@ -306,7 +306,7 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
               {/* Total Calculation Banner */}
               <div className="p-4 bg-gradient-to-r from-purple-900 to-indigo-950 text-white rounded-2xl flex items-center justify-between">
                 <div>
-                  <span className="text-[10px] text-purple-300 block font-bold">إجمالي المبلغ المسترد للدواء:</span>
+                  <span className="text-[10px] text-purple-300 block font-bold">المبلغ المسترد:</span>
                   <span className="text-xs text-purple-200">
                     {returnPacks} علبة × {Number(refundPricePack).toLocaleString()} د.ع
                   </span>
@@ -331,7 +331,7 @@ export const SupplierReturnModal: React.FC<SupplierReturnModalProps> = ({
                   className="px-6 py-2.5 bg-purple-700 hover:bg-purple-800 text-white rounded-xl text-xs font-black shadow-md cursor-pointer transition-all active:scale-95 flex items-center gap-2"
                 >
                   <RotateCcw className="w-4 h-4" />
-                  {submitting ? 'جاري الإرجاع والخصم...' : 'تأكيد الإرجاع للمذخر وتوليد السند'}
+                  {submitting ? 'جاري الإرجاع...' : 'تأكيد الإرجاع'}
                 </button>
               </div>
             </form>

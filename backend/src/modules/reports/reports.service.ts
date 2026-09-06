@@ -83,7 +83,27 @@ export class ReportsService {
       ${cogsDateFilter};
     `;
     const cogsStats: any[] = await this.prisma.$queryRawUnsafe(cogsSql, ...params);
-    const cogs = Number(cogsStats[0].cogs);
+    const rawCogs = Number(cogsStats[0]?.cogs || 0);
+
+    // Deduct cost of returned goods back to inventory
+    const retCogsSql = `
+      SELECT 
+        COALESCE(SUM(
+          CASE 
+            WHEN r.unit_type = 'PACK' THEN r.quantity * COALESCE(b.purchase_price_pack, 0)
+            ELSE (r.quantity::numeric / GREATEST(ii.units_per_pack, 1)) * COALESCE(b.purchase_price_pack, 0)
+          END
+        ), 0)::numeric as "returnedCogs"
+      FROM "${schemaName}".returns r
+      JOIN "${schemaName}".inventory_items ii ON r.inventory_item_id = ii.id
+      LEFT JOIN "${schemaName}".inventory_batches b ON b.inventory_item_id = ii.id AND b.id = (
+        SELECT inventory_batch_id FROM "${schemaName}".sale_items WHERE sale_id = r.sale_id AND inventory_item_id = r.inventory_item_id LIMIT 1
+      )
+      ${returnDateFilter};
+    `;
+    const retCogsStats: any[] = await this.prisma.$queryRawUnsafe(retCogsSql, ...params);
+    const returnedCogs = Number(retCogsStats[0]?.returnedCogs || 0);
+    const cogs = Math.max(0, rawCogs - returnedCogs);
 
     const netRevenue = Number(s.netRevenue) - Number(r.totalRefunds);
     const grossProfit = netRevenue - cogs;
@@ -365,10 +385,10 @@ export class ReportsService {
 
     if (dto.from && dto.to) {
       params.push(`${dto.from} 00:00:00`, `${dto.to} 23:59:59`);
-      dateFilter = `WHERE si.invoice_date >= $1::date AND si.invoice_date <= $2::date`;
+      dateFilter = `AND p.created_at >= $1::timestamp AND p.created_at <= $2::timestamp`;
     } else if (dto.from) {
       params.push(`${dto.from} 00:00:00`);
-      dateFilter = `WHERE si.invoice_date >= $1::date`;
+      dateFilter = `AND p.created_at >= $1::timestamp`;
     }
 
     try {
@@ -377,14 +397,14 @@ export class ReportsService {
           s.id as "supplierId",
           s.name as "supplierName",
           s.phone,
-          COUNT(si.id)::int as "invoicesCount",
-          COALESCE(SUM(si.total_amount), 0)::numeric as "totalPurchases",
-          COALESCE(SUM(si.paid_amount), 0)::numeric as "totalPaid",
-          COALESCE(SUM(si.remaining_amount), 0)::numeric as "remainingDebt"
+          COUNT(p.id)::int as "invoicesCount",
+          COALESCE(SUM(p.net_total_amount), 0)::numeric as "totalPurchases",
+          COALESCE(SUM(p.paid_amount), 0)::numeric as "totalPaid",
+          COALESCE(SUM(p.remaining_amount), 0)::numeric as "remainingDebt"
         FROM "${schemaName}".suppliers s
-        LEFT JOIN "${schemaName}".supplier_invoices si ON s.id = si.supplier_id
-        ${dateFilter}
+        LEFT JOIN "${schemaName}".purchases p ON s.id = p.supplier_id ${dateFilter}
         GROUP BY s.id
+        HAVING COUNT(p.id) > 0 OR COALESCE(SUM(p.remaining_amount), 0) > 0
         ORDER BY "remainingDebt" DESC;
       `;
 
@@ -409,7 +429,8 @@ export class ReportsService {
         },
         suppliers: suppliersReport,
       };
-    } catch {
+    } catch (err: any) {
+      this.logger.error(`Failed to generate debts report: ${err.message}`);
       return {
         summary: { totalPurchases: 0, totalPaid: 0, totalRemainingDebt: 0, totalSuppliers: 0 },
         suppliers: [],
@@ -486,17 +507,37 @@ export class ReportsService {
       ${cogsDateFilter};
     `;
     const cogsStats: any[] = await this.prisma.$queryRawUnsafe(cogsSql, ...params);
-    const cogs = Number(cogsStats[0]?.cogs || 0);
+    const rawCogs = Number(cogsStats[0]?.cogs || 0);
+
+    // Deduct cost of returned goods back to inventory
+    const retCogsSql = `
+      SELECT 
+        COALESCE(SUM(
+          CASE 
+            WHEN r.unit_type = 'PACK' THEN r.quantity * COALESCE(b.purchase_price_pack, 0)
+            ELSE (r.quantity::numeric / GREATEST(ii.units_per_pack, 1)) * COALESCE(b.purchase_price_pack, 0)
+          END
+        ), 0)::numeric as "returnedCogs"
+      FROM "${schemaName}".returns r
+      JOIN "${schemaName}".inventory_items ii ON r.inventory_item_id = ii.id
+      LEFT JOIN "${schemaName}".inventory_batches b ON b.inventory_item_id = ii.id AND b.id = (
+        SELECT inventory_batch_id FROM "${schemaName}".sale_items WHERE sale_id = r.sale_id AND inventory_item_id = r.inventory_item_id LIMIT 1
+      )
+      ${returnDateFilter};
+    `;
+    const retCogsStats: any[] = await this.prisma.$queryRawUnsafe(retCogsSql, ...params);
+    const returnedCogs = Number(retCogsStats[0]?.returnedCogs || 0);
+    const cogs = Math.max(0, rawCogs - returnedCogs);
 
     // 4. Operating Expenses
     let expDateFilter = '';
     const expParams: any[] = [];
     if (dto.from && dto.to) {
-      expParams.push(dto.from, dto.to);
-      expDateFilter = `WHERE expense_date >= $1::date AND expense_date <= $2::date`;
+      expParams.push(`${dto.from} 00:00:00`, `${dto.to} 23:59:59`);
+      expDateFilter = `WHERE expense_date >= $1::timestamp AND expense_date <= $2::timestamp`;
     } else if (dto.from) {
-      expParams.push(dto.from);
-      expDateFilter = `WHERE expense_date >= $1::date`;
+      expParams.push(`${dto.from} 00:00:00`);
+      expDateFilter = `WHERE expense_date >= $1::timestamp`;
     }
 
     let totalExpenses = 0;

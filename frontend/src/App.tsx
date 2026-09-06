@@ -16,11 +16,11 @@ import {
   LayoutDashboard,
   Menu,
   X,
-  ChevronRight,
-  ChevronLeft,
   Building2,
   ChevronDown,
   RefreshCw,
+  Pin,
+  PinOff,
 } from 'lucide-react';
 import { PosView } from './views/PosView';
 import { BulkStockEntryView } from './views/BulkStockEntryView';
@@ -142,25 +142,29 @@ export const App: React.FC = () => {
     }
   };
 
-  // Sidebar collapsible state (persisted)
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
-    return localStorage.getItem('dawaee_sidebar_collapsed') === 'true';
+  // Sidebar state:
+  // isSidebarPinned: false by default (hidden completely off-canvas as requested)
+  // isSidebarOpen: controls the sliding drawer
+  const [isSidebarPinned, setIsSidebarPinned] = useState<boolean>(() => {
+    return localStorage.getItem('dawaee_sidebar_pinned') === 'true';
   });
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
 
   // Proactive Alerts State
   const [expiringAlerts, setExpiringAlerts] = useState<any[]>([]);
   const [lowStockAlerts, setLowStockAlerts] = useState<any[]>([]);
   const [showAlertModal, setShowAlertModal] = useState<boolean>(false);
 
-  // Toggle and persist sidebar
-  const toggleSidebar = () => {
-    setIsSidebarCollapsed((prev) => {
-      const next = !prev;
-      localStorage.setItem('dawaee_sidebar_collapsed', String(next));
-      return next;
-    });
-  };
+  // Close drawer on Escape key press
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSidebarOpen && !isSidebarPinned) {
+        setIsSidebarOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSidebarOpen, isSidebarPinned]);
 
   // Proactive alert check on startup
   useEffect(() => {
@@ -285,45 +289,35 @@ export const App: React.FC = () => {
     return (
       <button
         onClick={() => {
-          setActiveTab(tab);
-          setIsMobileMenuOpen(false);
+          navigateToTab(tab);
+          if (!isSidebarPinned) {
+            setIsSidebarOpen(false);
+          }
         }}
-        title={isSidebarCollapsed ? label : undefined}
-        className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all duration-150 cursor-pointer group relative ${
+        className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all duration-150 cursor-pointer group relative ${
           isActive
             ? activeColor
             : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/70'
         }`}
       >
-        <Icon
-          className={`w-5 h-5 shrink-0 transition-transform group-hover:scale-110 ${
-            isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'
-          }`}
-        />
-        {!isSidebarCollapsed && (
-          <span className="truncate flex-1 text-right">{label}</span>
-        )}
-        {!isSidebarCollapsed && badge && (
-          <span className="px-2 py-0.5 text-[10px] font-black rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+        <div className="flex items-center gap-3 truncate min-w-0">
+          <Icon
+            className={`w-5 h-5 shrink-0 transition-transform group-hover:scale-110 ${
+              isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'
+            }`}
+          />
+          <span className="truncate">{label}</span>
+        </div>
+        {badge && (
+          <span className="px-2 py-0.5 text-[10px] font-black rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
             {badge}
           </span>
-        )}
-
-        {/* Hover Tooltip for Collapsed Mode */}
-        {isSidebarCollapsed && (
-          <div className="absolute right-full top-1/2 -translate-y-1/2 mr-3 px-3 py-1.5 bg-slate-950 text-white text-xs font-black rounded-xl whitespace-nowrap shadow-2xl opacity-0 group-hover:opacity-100 pointer-events-none transition-all z-50 border border-slate-800">
-            {label}
-            {badge && ` (${badge})`}
-          </div>
         )}
       </button>
     );
   };
 
   const SectionHeading = ({ title }: { title: string }) => {
-    if (isSidebarCollapsed) {
-      return <div className="h-px bg-slate-800/80 my-2 mx-1" />;
-    }
     return (
       <div className="text-[10px] font-black text-slate-400 px-3 pt-3 pb-1 tracking-wider uppercase">
         {title}
@@ -333,70 +327,78 @@ export const App: React.FC = () => {
 
   return (
     <div className="h-screen w-full max-w-full bg-slate-100 flex flex-row text-slate-900 font-sans antialiased overflow-x-hidden">
-      {/* Mobile Backdrop Overlay */}
-      {isMobileMenuOpen && (
+      {/* Backdrop Overlay (when sidebar drawer is open and unpinned) */}
+      {!isSidebarPinned && isSidebarOpen && (
         <div
-          onClick={() => setIsMobileMenuOpen(false)}
-          className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-40 md:hidden animate-in fade-in duration-200"
+          onClick={() => setIsSidebarOpen(false)}
+          className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-40 animate-in fade-in duration-200"
         />
       )}
 
-      {/* Fixed Structure Sidebar */}
+      {/* Sidebar: Either Docked (Pinned) or Off-Canvas Drawer (Unpinned / Hidden) */}
       <aside
-        className={`h-screen bg-slate-900 text-white flex flex-col justify-between border-l border-slate-800 z-40 transition-all duration-300 ease-in-out shrink-0 select-none shadow-xl md:shadow-none fixed md:static ${
-          isMobileMenuOpen
-            ? 'translate-x-0 w-64'
-            : '-translate-x-full md:translate-x-0 ' + (isSidebarCollapsed ? 'w-20' : 'w-64')
+        className={`h-screen bg-slate-900 text-white flex flex-col justify-between border-l border-slate-800 shrink-0 select-none shadow-2xl transition-all duration-300 ease-in-out ${
+          isSidebarPinned
+            ? 'w-64 static z-30'
+            : `fixed top-0 bottom-0 right-0 z-50 w-72 ${
+                isSidebarOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
+              }`
         }`}
       >
-        {/* Top Logo & Collapse Toggle */}
+        {/* Top Logo & Drawer Actions */}
         <div className="h-14 px-4 flex items-center justify-between border-b border-slate-800 shrink-0">
-          <div className="flex items-center gap-3 overflow-hidden">
+          <div className="flex items-center gap-2.5 overflow-hidden">
             {currentPharmacy?.logoUrl ? (
               <img
                 src={currentPharmacy.logoUrl}
                 alt="Logo"
-                className="w-9 h-9 rounded-xl object-contain bg-white p-0.5 shadow-md shrink-0"
+                className="w-8 h-8 rounded-xl object-contain bg-white p-0.5 shadow-md shrink-0"
               />
             ) : (
-              <div className="w-9 h-9 bg-emerald-600 text-white rounded-xl flex items-center justify-center font-black shadow-md shrink-0">
-                <Pill className="w-5 h-5" />
+              <div className="w-8 h-8 bg-emerald-600 text-white rounded-xl flex items-center justify-center font-black shadow-md shrink-0">
+                <Pill className="w-4 h-4" />
               </div>
             )}
 
-            {!isSidebarCollapsed && (
-              <div className="truncate">
-                <div className="font-black text-sm text-white flex items-center gap-1.5">
-                  <span>{currentPharmacy?.name || 'نظام دوائي'}</span>
-                </div>
-                <div className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span>متصل بالسحابة</span>
-                </div>
+            <div className="truncate">
+              <div className="font-black text-xs text-white flex items-center gap-1.5">
+                <span>{currentPharmacy?.name || 'نظام دوائي'}</span>
               </div>
-            )}
+              <div className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>متصل بالسحابة</span>
+              </div>
+            </div>
           </div>
 
-          {/* Desktop Toggle Button */}
-          <button
-            onClick={toggleSidebar}
-            className="hidden md:flex p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all cursor-pointer"
-            title={isSidebarCollapsed ? 'توسيع القائمة الجانبية' : 'طي القائمة الجانبية'}
-          >
-            {isSidebarCollapsed ? (
-              <ChevronLeft className="w-5 h-5 text-slate-300" />
-            ) : (
-              <ChevronRight className="w-5 h-5 text-slate-300" />
-            )}
-          </button>
+          {/* Pin & Close Buttons */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                setIsSidebarPinned((prev) => {
+                  const next = !prev;
+                  localStorage.setItem('dawaee_sidebar_pinned', String(next));
+                  return next;
+                });
+              }}
+              className={`p-1.5 rounded-xl transition-all cursor-pointer ${
+                isSidebarPinned
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+              title={isSidebarPinned ? 'إلغاء التثبيت (إخفاء تلقائي كامل)' : 'تثبيت القائمة دائماً'}
+            >
+              {isSidebarPinned ? <Pin className="w-4 h-4" /> : <PinOff className="w-4 h-4" />}
+            </button>
 
-          {/* Mobile Close Button */}
-          <button
-            onClick={() => setIsMobileMenuOpen(false)}
-            className="md:hidden p-1.5 text-slate-400 hover:text-white"
-          >
-            <X className="w-5 h-5" />
-          </button>
+            <button
+              onClick={() => setIsSidebarOpen(false)}
+              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-all cursor-pointer"
+              title="إغلاق القائمة"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Navigation Items */}
@@ -414,32 +416,32 @@ export const App: React.FC = () => {
           ) : (
             <>
               {/* Sales & POS */}
-              <SectionHeading title="المبيعات والكاشير" />
+              <SectionHeading title="المبيعات" />
               <NavItem
                 tab="POS"
-                label="نقطة البيع (الكاشير)"
+                label="الكاشير"
                 icon={ShoppingCart}
                 badge="رئيسي"
                 activeColor="bg-emerald-600 text-white shadow-md shadow-emerald-900/30"
               />
 
               {/* Warehouse & Inventory */}
-              <SectionHeading title="إدارة المخزون والمشتريات" />
+              <SectionHeading title="المخزن والمشتريات" />
               <NavItem
                 tab="INVENTORY"
-                label="المخزون والباركود"
+                label="المخزن"
                 icon={Package}
                 activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
               />
               <NavItem
                 tab="PURCHASES"
-                label="فواتير المشتريات"
+                label="المشتريات"
                 icon={FileText}
                 activeColor="bg-blue-600 text-white shadow-md shadow-blue-900/30"
               />
               <NavItem
                 tab="BULK_STOCK"
-                label="إدخال وجبة سريعة"
+                label="إدخال وجبة"
                 icon={PackagePlus}
                 activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
               />
@@ -447,10 +449,10 @@ export const App: React.FC = () => {
               {/* Financial & Accounts */}
               {currentUser?.role === 'OWNER' && (
                 <>
-                  <SectionHeading title="المالية والأرباح" />
+                  <SectionHeading title="المالية" />
                   <NavItem
                     tab="EXPENSES"
-                    label="المصاريف التشغيلية"
+                    label="المصاريف"
                     icon={TrendingDown}
                     activeColor="bg-rose-600 text-white shadow-md shadow-rose-900/30"
                   />
@@ -462,7 +464,7 @@ export const App: React.FC = () => {
                   />
                   <NavItem
                     tab="REPORTS"
-                    label="التقارير والأرباح P&L"
+                    label="التقارير"
                     icon={TrendingUp}
                     activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
                   />
@@ -475,20 +477,20 @@ export const App: React.FC = () => {
                   <SectionHeading title="المتابعة والإعدادات" />
                   <NavItem
                     tab="CHAIN"
-                    label="إدارة الفروع والسلسلة"
+                    label="الفروع"
                     icon={Building2}
                     badge={branches.length > 1 ? `${branches.length} فروع` : undefined}
                     activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
                   />
                   <NavItem
                     tab="OWNER_DASHBOARD"
-                    label="متابعة المالك (Live)"
+                    label="المتابعة"
                     icon={LayoutDashboard}
                     activeColor="bg-slate-800 border border-slate-700 text-emerald-400 shadow-md"
                   />
                   <NavItem
                     tab="PROFILE"
-                    label="إعدادات الصيدلية"
+                    label="الإعدادات"
                     icon={Settings}
                     activeColor="bg-slate-700 text-white shadow-md"
                   />
@@ -498,10 +500,10 @@ export const App: React.FC = () => {
           )}
 
           {/* Public Search Portal preview */}
-          <SectionHeading title="شبكة البحث" />
+          <SectionHeading title="بحث الأدوية" />
           <NavItem
             tab="PUBLIC_SEARCH"
-            label="بحث الجمهور الشبكي"
+            label="بحث الأدوية"
             icon={Search}
             activeColor="bg-teal-600 text-white shadow-md"
           />
@@ -514,20 +516,18 @@ export const App: React.FC = () => {
               <div className="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700 text-emerald-400 flex items-center justify-center font-bold text-xs shrink-0">
                 <UserCheck className="w-4 h-4" />
               </div>
-              {!isSidebarCollapsed && (
-                <div className="truncate">
-                  <div className="text-xs font-bold text-slate-200 truncate">
-                    {currentUser?.name || 'المستخدم'}
-                  </div>
-                  <div className="text-[10px] text-slate-500 font-mono">
-                    {currentUser?.role === 'OWNER'
-                      ? 'صاحب الصيدلية'
-                      : currentUser?.role === 'SUPER_ADMIN'
-                      ? 'المدير العام'
-                      : 'كاشير الصيدلية'}
-                  </div>
+              <div className="truncate min-w-0">
+                <div className="text-xs font-bold text-slate-200 truncate">
+                  {currentUser?.name || 'المستخدم'}
                 </div>
-              )}
+                <div className="text-[10px] text-slate-500 font-mono">
+                  {currentUser?.role === 'OWNER'
+                    ? 'صاحب الصيدلية'
+                    : currentUser?.role === 'SUPER_ADMIN'
+                    ? 'المدير العام'
+                    : 'كاشير الصيدلية'}
+                </div>
+              </div>
             </div>
 
             <button
@@ -546,14 +546,17 @@ export const App: React.FC = () => {
         {/* Slim Fixed Top Bar */}
         <header className="bg-white border-b border-slate-200/90 h-14 px-3 sm:px-5 flex items-center justify-between shrink-0 shadow-2xs w-full max-w-full">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-            {/* Mobile Hamburger Toggle */}
-            <button
-              onClick={() => setIsMobileMenuOpen(true)}
-              className="md:hidden p-2 text-slate-700 hover:bg-slate-100 rounded-xl cursor-pointer shrink-0"
-              title="فتح القائمة"
-            >
-              <Menu className="w-5 h-5" />
-            </button>
+            {/* Hamburger Toggle Button (opens off-canvas drawer) */}
+            {(!isSidebarPinned || !isSidebarOpen) && (
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-2 text-slate-700 hover:text-indigo-600 hover:bg-slate-100 rounded-xl cursor-pointer shrink-0 transition-all flex items-center gap-1.5 active:scale-95 border border-slate-200/80 shadow-2xs"
+                title="فتح القائمة الرئيسية"
+              >
+                <Menu className="w-5 h-5" />
+                <span className="text-xs font-bold hidden sm:inline text-slate-700">القائمة</span>
+              </button>
+            )}
 
             {/* Current Active Page Title & Breadcrumb */}
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 min-w-0">
@@ -561,16 +564,16 @@ export const App: React.FC = () => {
               <span className="text-slate-300 hidden lg:inline">/</span>
               <span className="text-slate-900 font-black truncate text-xs sm:text-sm">
                 {activeTab === 'POS' && 'الكاشير'}
-                {activeTab === 'INVENTORY' && 'المخزون والباركود'}
+                {activeTab === 'INVENTORY' && 'المخزن'}
                 {activeTab === 'PURCHASES' && 'المشتريات'}
                 {activeTab === 'BULK_STOCK' && 'إدخال وجبة'}
-                {activeTab === 'EXPENSES' && 'المصاريف التشغيلية'}
-                {activeTab === 'CHAIN' && 'إدارة الفروع والسلاسل'}
+                {activeTab === 'EXPENSES' && 'المصاريف'}
+                {activeTab === 'CHAIN' && 'الفروع'}
                 {activeTab === 'SUPPLIERS' && 'المذاخر والديون'}
-                {activeTab === 'REPORTS' && 'التقارير والأرباح'}
-                {activeTab === 'OWNER_DASHBOARD' && 'متابعة المالك'}
-                {activeTab === 'PROFILE' && 'إعدادات الصيدلية'}
-                {activeTab === 'ADMIN' && 'لوحة الإدارة'}
+                {activeTab === 'REPORTS' && 'التقارير'}
+                {activeTab === 'OWNER_DASHBOARD' && 'المتابعة'}
+                {activeTab === 'PROFILE' && 'الإعدادات'}
+                {activeTab === 'ADMIN' && 'لوحة التحكم'}
               </span>
             </div>
           </div>

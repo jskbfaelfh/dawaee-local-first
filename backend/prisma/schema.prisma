@@ -106,16 +106,20 @@ model StockTransfer {
 }
 
 model Medicine {
-  id                  String   @id @default(uuid()) @db.Uuid
-  tradeName           String   @map("trade_name") @db.VarChar(255)
-  scientificName      String   @map("scientific_name") @db.VarChar(255)
-  dosageForm          String?  @map("dosage_form") @db.VarChar(100)
-  strength            String?  @db.VarChar(100)
-  manufacturer        String?  @db.VarChar(255)
-  barcode             String?  @db.VarChar(100)
-  defaultUnitsPerPack Int      @default(1) @map("default_units_per_pack")
-  isVerified          Boolean  @default(true) @map("is_verified")
-  createdAt           DateTime @default(now()) @map("created_at")
+  id                     String   @id @default(uuid()) @db.Uuid
+  tradeName              String   @map("trade_name") @db.VarChar(255)
+  scientificName         String?  @map("scientific_name") @db.VarChar(255)
+  dosageForm             String?  @map("dosage_form") @db.VarChar(100)
+  strength               String?  @db.VarChar(100)
+  manufacturer           String?  @db.VarChar(255)
+  barcode                String?  @db.VarChar(100)
+  defaultUnitsPerPack    Int      @default(1) @map("default_units_per_pack")
+  defaultPurchasePrice   Decimal? @default(0) @map("default_purchase_price") @db.Decimal(12, 2)
+  needsStrengthReview    Boolean  @default(false) @map("needs_strength_review")
+  needsFormReview        Boolean  @default(false) @map("needs_form_review")
+  needsPackagingReview   Boolean  @default(true) @map("needs_packaging_review")
+  isVerified             Boolean  @default(true) @map("is_verified")
+  createdAt              DateTime @default(now()) @map("created_at")
 
   searchIndexes CentralSearchIndex[]
 
@@ -138,7 +142,7 @@ model CentralSearchIndex {
   longitude         Decimal? @db.Decimal(11, 8)
   phone             String   @db.VarChar(50)
   tradeName         String   @map("trade_name") @db.VarChar(255)
-  scientificName    String   @map("scientific_name") @db.VarChar(255)
+  scientificName    String?  @map("scientific_name") @db.VarChar(255)
   dosageForm        String?  @map("dosage_form") @db.VarChar(100)
   strength          String?  @db.VarChar(100)
   sellingPricePack  Decimal  @map("selling_price_pack") @db.Decimal(12, 2)

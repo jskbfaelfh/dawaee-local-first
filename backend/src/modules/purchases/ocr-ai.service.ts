@@ -126,7 +126,7 @@ export class OcrAiService {
     // 1. Check Pharmacy-specific Gemini API Key
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { geminiApiKey: true, name: true },
+      select: { geminiApiKey: true, name: true, schemaName: true },
     });
 
     const apiKey = tenant?.geminiApiKey?.trim() || process.env.GEMINI_API_KEY;
@@ -216,12 +216,111 @@ export class OcrAiService {
         discrepancies.push(`🎁 يشتمل على بونص مجاني (${bonusQuantity} علب هدايا)`);
       }
 
+      // Fetch last known history from the pharmacy's inventory for this item by barcode / medicine_id / name
+      const effectiveBarcode = matchResult.barcode || barcode;
+      const effectiveMedId = matchResult.medicine?.id;
+      let existingItem: any = null;
+      let existingBatch: any = null;
+
+      try {
+        if (tenant?.schemaName) {
+          const schema = tenant.schemaName;
+          let itemSql = `
+            SELECT ii.id, ii.custom_name as "customName", ii.units_per_pack as "unitsPerPack",
+                   ii.selling_price_pack as "sellingPricePack", ii.selling_price_unit as "sellingPriceUnit",
+                   ii.shelf_location as "shelfLocation"
+            FROM "${schema}".inventory_items ii
+            LEFT JOIN public.medicines m ON ii.medicine_id = m.id
+            WHERE 1=0
+          `;
+          const itemParams: any[] = [];
+          if (effectiveBarcode && effectiveBarcode.length > 3) {
+            itemParams.push(effectiveBarcode);
+            itemSql += ` OR m.barcode = $${itemParams.length}`;
+          }
+          if (effectiveMedId) {
+            itemParams.push(effectiveMedId);
+            itemSql += ` OR ii.medicine_id = $${itemParams.length}::uuid`;
+          }
+          if (cleanName && cleanName.length > 2) {
+            itemParams.push(`%${cleanName}%`);
+            itemSql += ` OR m.trade_name ILIKE $${itemParams.length} OR ii.custom_name ILIKE $${itemParams.length}`;
+          }
+          itemSql += ` ORDER BY ii.updated_at DESC LIMIT 1`;
+
+          if (itemParams.length > 0) {
+            const foundItems: any[] = await this.prisma.$queryRawUnsafe(itemSql, ...itemParams);
+            if (foundItems.length > 0) {
+              existingItem = foundItems[0];
+
+              const foundBatches: any[] = await this.prisma.$queryRawUnsafe(
+                `SELECT batch_number as "batchNumber",
+                        TO_CHAR(expiry_date, 'YYYY-MM-DD') as "expiryDate",
+                        purchase_price_pack as "purchasePricePack",
+                        selling_price_pack as "sellingPricePack",
+                        selling_price_unit as "sellingPriceUnit"
+                 FROM "${schema}".inventory_batches
+                 WHERE inventory_item_id = $1::uuid
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                existingItem.id,
+              );
+              if (foundBatches.length > 0) {
+                existingBatch = foundBatches[0];
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        this.logger.warn(`Could not lookup existing inventory history in OCR: ${err.message}`);
+      }
+
+      // 1. Units per pack: take from pharmacy's existing inventory first
+      const units = Number(
+        existingItem?.unitsPerPack || matchResult.medicine?.unitsPerPack || item.unitsPerPack || 1,
+      );
+
+      // 2. Selling Price: if invoice has no retail selling price, autofill from pharmacy's existing record
+      let finalSellingPrice = sellingPrice;
+      if (finalSellingPrice <= 0) {
+        finalSellingPrice = Number(
+          existingItem?.sellingPricePack || existingBatch?.sellingPricePack || 0,
+        );
+      }
+
+      // Selling Price Unit
+      let unitPrice = Number(item.sellingPriceUnit || 0);
+      if (unitPrice <= 0) {
+        unitPrice = Number(
+          existingItem?.sellingPriceUnit || existingBatch?.sellingPriceUnit || 0,
+        );
+      }
+      if (unitPrice <= 0 && finalSellingPrice > 0 && units > 0) {
+        unitPrice = Math.round(finalSellingPrice / units);
+      }
+
+      // 3. Shelf Location: autofill from existing inventory
+      const shelfLocation = existingItem?.shelfLocation ? String(existingItem.shelfLocation).trim() : '';
+
+      // 4. Expiry Date: if invoice did not provide an expiry date, fallback to last known batch date
+      if (!expiryDate && existingBatch?.expiryDate) {
+        expiryDate = existingBatch.expiryDate;
+        discrepancies.push(`📅 تم اقتراح الصلاحية من آخر وجبة سابقة: ${expiryDate}`);
+      }
+
+      if (existingItem) {
+        const prefilledNotes: string[] = [];
+        if (finalSellingPrice > 0) prefilledNotes.push(`السعر: ${finalSellingPrice.toLocaleString()} د.ع`);
+        if (shelfLocation) prefilledNotes.push(`الرف: ${shelfLocation}`);
+        if (units > 1) prefilledNotes.push(`العلبة: ${units} شريط`);
+        if (prefilledNotes.length > 0) {
+          discrepancies.push(`📦 تم جلب البيانات تلقائياً من مخزنك السابق (${prefilledNotes.join(' | ')})`);
+        }
+      }
+
       if (discrepancies.length > 0) {
         discrepanciesCount += discrepancies.length;
       }
-
-      const units = matchResult.medicine?.unitsPerPack || item.unitsPerPack || 1;
-      const unitPrice = sellingPrice > 0 && units > 1 ? Math.round(sellingPrice / units) : sellingPrice;
 
       const cleanMatchedName = matchResult.medicine?.tradeName
         ? cleanTradeNameWithStrength(matchResult.medicine.tradeName, cleanStrength).cleanName
@@ -243,9 +342,9 @@ export class OcrAiService {
         unitsPerPack: units,
         purchasePricePack: purchasePrice,
         discountPercent,
-        sellingPricePack: sellingPrice,
+        sellingPricePack: finalSellingPrice,
         sellingPriceUnit: unitPrice,
-        shelfLocation: '',
+        shelfLocation,
         totalCost: quantityPacks * (purchasePrice * (1 - discountPercent / 100)),
         confidence: matchResult.confidence,
         discrepancies,
@@ -449,8 +548,8 @@ export class OcrAiService {
       Important: Return ONLY valid JSON format. Do NOT wrap in markdown or explanations.
     `;
 
-    // Use official active Google Gemini Vision models (starting with fast gemini-1.5-flash)
-    const models = ['gemini-1.5-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-pro'];
+    // Use official active Google Gemini Vision models (starting with fast gemini-2.5-flash)
+    const models = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-pro', 'gemini-pro-latest'];
     let lastError = null;
 
     for (const model of models) {

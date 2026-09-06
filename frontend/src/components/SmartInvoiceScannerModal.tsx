@@ -15,6 +15,7 @@ import {
   Hash,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
+import { SmartExpiryInput } from './SmartExpiryInput';
 
 export interface ScannedItem {
   id: string;
@@ -273,6 +274,18 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
       updated[index] = item;
       return updated;
     });
+  };
+
+  // Fast Enter key navigation helper
+  const handleKeyDownNav = (e: React.KeyboardEvent<HTMLElement>, nextFieldId: string) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const nextEl = document.getElementById(nextFieldId);
+      if (nextEl) {
+        nextEl.focus();
+        (nextEl as HTMLInputElement).select?.();
+      }
+    }
   };
 
   // Remove Item
@@ -593,7 +606,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                     className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>+ إضافة صنف يدوياً</span>
+                    <span>إضافة مادة +</span>
                   </button>
                 </div>
               </div>
@@ -603,7 +616,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
                     <Hash className="w-3.5 h-3.5 text-slate-400" />
-                    <span>رقم فاتورة المذخر</span>
+                    <span>رقم الفاتورة</span>
                   </label>
                   <input
                     type="text"
@@ -615,7 +628,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
                     <Tag className="w-3.5 h-3.5 text-slate-400" />
-                    <span>اسم المذخر / المجهز</span>
+                    <span>المذخر</span>
                   </label>
                   <input
                     type="text"
@@ -627,7 +640,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
                     <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                    <span>تاريخ الفاتورة</span>
+                    <span>التاريخ</span>
                   </label>
                   <input
                     type="date"
@@ -769,14 +782,14 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                   <div className="flex items-center gap-2">
                     <Package className="w-5 h-5 text-emerald-600" />
                     <h5 className="font-black text-sm text-slate-900">
-                      جدول الأدوية والمواد ({items.length} صنف)
+                      المواد ({items.length})
                     </h5>
                     <span className="px-2 py-0.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-full text-[10px] font-bold">
-                      قابل للتعديل 100%
+                      تعديل
                     </span>
                   </div>
-                  <div className="text-[11px] text-slate-400 font-medium">
-                    * اضغط على أي خانة للتعديل الفوري. لا يوجد أي تخمين للبيانات غير المتوفرة.
+                  <div className="text-[11px] text-slate-400 font-bold font-mono">
+                    Enter للتنقل بين الحقول
                   </div>
                 </div>
 
@@ -786,19 +799,19 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                       <thead className="bg-slate-100 sticky top-0 z-10 border-b border-slate-200 text-slate-700 font-black">
                         <tr>
                           <th className="p-2.5 text-center w-8">#</th>
-                          <th className="p-2.5 min-w-[200px]">اسم الدواء + التركيز فقط</th>
+                          <th className="p-2.5 min-w-[200px]">الدواء</th>
                           <th className="p-2.5 min-w-[120px]">الباركود</th>
-                          <th className="p-2.5 min-w-[70px] text-center">أشرطة/باكيت</th>
-                          <th className="p-2.5 min-w-[75px] text-center">الكمية (علب)</th>
-                          <th className="p-2.5 min-w-[70px] text-center">البونص (هدايا)</th>
-                          <th className="p-2.5 min-w-[100px]">سعر الشراء (د.ع)</th>
-                          <th className="p-2.5 min-w-[70px] text-center">خصم المادة %</th>
-                          <th className="p-2.5 min-w-[105px]">سعر بيع الباكيت (د.ع)</th>
-                          <th className="p-2.5 min-w-[95px]">سعر الشريط (د.ع)</th>
-                          <th className="p-2.5 min-w-[105px]">رقم الوجبة (Batch)</th>
-                          <th className="p-2.5 min-w-[140px]">الصلاحية (شهر / سنة)</th>
+                          <th className="p-2.5 min-w-[70px] text-center">الشريط/علبة</th>
+                          <th className="p-2.5 min-w-[75px] text-center">الكمية</th>
+                          <th className="p-2.5 min-w-[70px] text-center">بونص</th>
+                          <th className="p-2.5 min-w-[100px]">سعر الشراء</th>
+                          <th className="p-2.5 min-w-[70px] text-center">خصم %</th>
+                          <th className="p-2.5 min-w-[105px]">بيع الباكيت</th>
+                          <th className="p-2.5 min-w-[95px]">بيع الشريط</th>
+                          <th className="p-2.5 min-w-[105px]">الوجبة</th>
+                          <th className="p-2.5 min-w-[140px]">الصلاحية</th>
                           <th className="p-2.5 min-w-[80px]">الرف</th>
-                          <th className="p-2.5 min-w-[100px]">المجموع الصافي</th>
+                          <th className="p-2.5 min-w-[100px]">المجموع</th>
                           <th className="p-2.5 text-center w-10">حذف</th>
                         </tr>
                       </thead>
@@ -819,9 +832,11 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 1. Medicine Name + Strength ONLY */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-trade-${idx}`}
                                   type="text"
                                   value={item.matchedTradeName}
                                   onChange={(e) => updateItemField(idx, 'matchedTradeName', e.target.value)}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-barcode-${idx}`)}
                                   placeholder="اسم الدواء + التركيز (مثل: Panadol 500mg)"
                                   className="w-full p-1.5 font-black text-slate-900 bg-white border border-slate-200 rounded-lg text-xs focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -835,9 +850,11 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 2. Barcode */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-barcode-${idx}`}
                                   type="text"
                                   value={item.barcode}
                                   onChange={(e) => updateItemField(idx, 'barcode', e.target.value)}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-units-${idx}`)}
                                   placeholder="فارغ أو امسحه"
                                   className="w-full p-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -846,10 +863,12 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 3. Units Per Pack */}
                               <td className="p-2.5 text-center">
                                 <input
+                                  id={`scanner-units-${idx}`}
                                   type="number"
                                   min="1"
                                   value={item.unitsPerPack}
                                   onChange={(e) => updateItemField(idx, 'unitsPerPack', Math.max(1, Number(e.target.value)))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-qty-${idx}`)}
                                   className="w-14 p-1.5 text-center bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold text-slate-900 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
                               </td>
@@ -857,10 +876,12 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 4. Quantity Packs */}
                               <td className="p-2.5 text-center">
                                 <input
+                                  id={`scanner-qty-${idx}`}
                                   type="number"
                                   min="1"
                                   value={item.quantityPacks}
                                   onChange={(e) => updateItemField(idx, 'quantityPacks', Math.max(0, Number(e.target.value)))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-bonus-${idx}`)}
                                   className="w-16 p-1.5 text-center bg-white border border-slate-300 rounded-lg font-mono font-black text-slate-900 text-xs focus:border-emerald-500 focus:outline-hidden"
                                 />
                               </td>
@@ -868,10 +889,12 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 5. Bonus Packs */}
                               <td className="p-2.5 text-center">
                                 <input
+                                  id={`scanner-bonus-${idx}`}
                                   type="number"
                                   min="0"
                                   value={item.bonusPacks}
                                   onChange={(e) => updateItemField(idx, 'bonusPacks', Math.max(0, Number(e.target.value)))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-purchase-${idx}`)}
                                   className="w-14 p-1.5 text-center bg-emerald-50 border border-emerald-200 rounded-lg font-mono font-bold text-emerald-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
                               </td>
@@ -879,11 +902,13 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 6. Purchase Price Pack */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-purchase-${idx}`}
                                   type="number"
                                   min="0"
                                   step="250"
                                   value={item.purchasePricePack || ''}
                                   onChange={(e) => updateItemField(idx, 'purchasePricePack', Number(e.target.value))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-discount-${idx}`)}
                                   placeholder="سعر الشراء"
                                   className="w-24 p-1.5 bg-white border border-slate-300 rounded-lg font-mono font-black text-slate-900 text-xs focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -892,12 +917,14 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 7. Discount Percent on Item */}
                               <td className="p-2.5 text-center">
                                 <input
+                                  id={`scanner-discount-${idx}`}
                                   type="number"
                                   min="0"
                                   max="100"
                                   step="0.5"
                                   value={item.discountPercent || ''}
                                   onChange={(e) => updateItemField(idx, 'discountPercent', Number(e.target.value))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-selling-pack-${idx}`)}
                                   placeholder="0%"
                                   className="w-14 p-1.5 text-center bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -906,11 +933,13 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 8. Selling Price Pack */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-selling-pack-${idx}`}
                                   type="number"
                                   min="0"
                                   step="250"
                                   value={item.sellingPricePack || ''}
                                   onChange={(e) => updateItemField(idx, 'sellingPricePack', Number(e.target.value))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-selling-unit-${idx}`)}
                                   placeholder="سعر البيع"
                                   className="w-24 p-1.5 bg-emerald-50/60 border border-emerald-300 rounded-lg font-mono font-black text-emerald-900 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -919,11 +948,13 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 9. Selling Price Unit */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-selling-unit-${idx}`}
                                   type="number"
                                   min="0"
                                   step="250"
                                   value={item.sellingPriceUnit || ''}
                                   onChange={(e) => updateItemField(idx, 'sellingPriceUnit', Number(e.target.value))}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-batch-${idx}`)}
                                   placeholder="شريط"
                                   className="w-20 p-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -932,9 +963,11 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                               {/* 10. Batch Number */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-batch-${idx}`}
                                   type="text"
                                   value={item.batchNumber}
                                   onChange={(e) => updateItemField(idx, 'batchNumber', e.target.value)}
+                                  onKeyDown={(e) => handleKeyDownNav(e, `scanner-exp-month-${idx}`)}
                                   placeholder="رقم التشغيلة"
                                   className="w-24 p-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
@@ -942,37 +975,48 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
 
                               {/* 11. Expiry Month & Year */}
                               <td className="p-2.5">
-                                <div className="flex items-center gap-1">
-                                  <input
-                                    type="number"
-                                    min="1"
-                                    max="12"
-                                    placeholder="شهر"
-                                    value={item.expiryMonth || ''}
-                                    onChange={(e) => updateItemField(idx, 'expiryMonth', e.target.value ? Number(e.target.value) : '')}
-                                    className="w-12 p-1.5 text-center bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
-                                  />
-                                  <span className="text-slate-400">/</span>
-                                  <input
-                                    type="number"
-                                    min="2024"
-                                    max="2040"
-                                    placeholder="سنة"
-                                    value={item.expiryYear || ''}
-                                    onChange={(e) => updateItemField(idx, 'expiryYear', e.target.value ? Number(e.target.value) : '')}
-                                    className="w-16 p-1.5 text-center bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
-                                  />
-                                </div>
+                                <SmartExpiryInput
+                                  month={item.expiryMonth}
+                                  year={item.expiryYear}
+                                  monthId={`scanner-exp-month-${idx}`}
+                                  yearId={`scanner-exp-year-${idx}`}
+                                  onChange={(m, y) => {
+                                    updateItemField(idx, 'expiryMonth', m || '');
+                                    updateItemField(idx, 'expiryYear', y || '');
+                                  }}
+                                  onNext={() => {
+                                    const shelfInput = document.getElementById(`scanner-shelf-${idx}`);
+                                    shelfInput?.focus();
+                                    (shelfInput as HTMLInputElement)?.select?.();
+                                  }}
+                                />
                               </td>
 
                               {/* 12. Shelf Location */}
                               <td className="p-2.5">
                                 <input
+                                  id={`scanner-shelf-${idx}`}
                                   type="text"
                                   value={item.shelfLocation}
                                   onChange={(e) => updateItemField(idx, 'shelfLocation', e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      if (idx < items.length - 1) {
+                                        const nextTrade =
+                                          document.getElementById(`scanner-trade-${idx + 1}`) ||
+                                          document.getElementById(`scanner-qty-${idx + 1}`);
+                                        if (nextTrade) {
+                                          nextTrade.focus();
+                                          (nextTrade as HTMLInputElement).select?.();
+                                        }
+                                      } else {
+                                        document.getElementById('scanner-save-batch-btn')?.focus();
+                                      }
+                                    }
+                                  }}
                                   placeholder="A-01"
-                                  className="w-16 p-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
+                                  className="w-16 p-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden font-bold text-center"
                                 />
                               </td>
 
@@ -1086,6 +1130,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
               </button>
 
               <button
+                id="scanner-save-batch-btn"
                 type="button"
                 disabled={submitting}
                 onClick={handleApproveInvoice}

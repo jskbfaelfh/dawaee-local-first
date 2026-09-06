@@ -190,7 +190,7 @@ export class SearchService {
     let alternatives: any[] = [];
     if (term.length > 0 && rawResults.length > 0) {
       const primaryScientificNames = Array.from(
-        new Set(rawResults.map((r) => r.scientificName.trim()).filter(Boolean)),
+        new Set(rawResults.map((r) => r.scientificName?.trim() || '').filter(Boolean)),
       );
       const matchedTradeNames = new Set(rawResults.map((r) => r.tradeName.toLowerCase()));
 

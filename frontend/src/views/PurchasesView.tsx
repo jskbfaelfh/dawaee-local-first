@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
   FileText,
-  Plus,
   Search,
   Package,
   Eye,
@@ -10,13 +9,11 @@ import {
   AlertCircle,
   RefreshCw,
   Printer,
-  Trash2,
   Sparkles,
   Camera,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { SmartInvoiceScannerModal } from '../components/SmartInvoiceScannerModal';
-import { AddUnregisteredMedicineModal } from '../components/AddUnregisteredMedicineModal';
 
 interface PurchaseInvoiceItem {
   id?: string;
@@ -49,39 +46,13 @@ interface PurchaseInvoice {
 
 export const PurchasesView: React.FC = () => {
   const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
-  const [suppliers, setSuppliers] = useState<any[]>([]);
-  const [medicines, setMedicines] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedInvoice, setSelectedInvoice] = useState<PurchaseInvoice | null>(null);
-  const [showNewModal, setShowNewModal] = useState(false);
   const [showAiScanModal, setShowAiScanModal] = useState(false);
-  const [showAddMedModal, setShowAddMedModal] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
-  // New Invoice Form State
-  const [invoiceNumber, setInvoiceNumber] = useState('');
-  const [selectedSupplierId, setSelectedSupplierId] = useState('');
-  const [supplierName, setSupplierName] = useState('');
-  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 10));
-  const [paidAmount, setPaidAmount] = useState<number>(0);
-  const [notes, setNotes] = useState('');
-  const [earlyDiscountDays, setEarlyDiscountDays] = useState<number | ''>('');
-  const [earlyDiscountPercent, setEarlyDiscountPercent] = useState<number | ''>('');
   const [earlyDiscountAlerts, setEarlyDiscountAlerts] = useState<any[]>([]);
   const [applyingDiscountId, setApplyingDiscountId] = useState<string | null>(null);
-  const [invoiceItems, setInvoiceItems] = useState<PurchaseInvoiceItem[]>([]);
-
-  // Medicine selection for new item
-  const [itemSearch, setItemSearch] = useState('');
-  const [filteredMedicines, setFilteredMedicines] = useState<any[]>([]);
-  const [selectedMed, setSelectedMed] = useState<any | null>(null);
-  const [itemBatch, setItemBatch] = useState('');
-  const [itemExpiry, setItemExpiry] = useState('');
-  const [itemQtyPacks, setItemQtyPacks] = useState<number>(1);
-  const [itemPurchasePrice, setItemPurchasePrice] = useState<number>(0);
-  const [itemSellingPrice, setItemSellingPrice] = useState<number>(0);
 
   const fetchInvoices = async () => {
     setLoading(true);
@@ -99,13 +70,7 @@ export const PurchasesView: React.FC = () => {
 
   const fetchInitialData = async () => {
     try {
-      const [sups, meds, alerts] = await Promise.all([
-        apiRequest<any[]>('/inventory/suppliers').catch(() => []),
-        apiRequest<any[]>('/medicines/search?limit=100').catch(() => []),
-        apiRequest<any[]>('/purchases/early-discount-alerts').catch(() => []),
-      ]);
-      setSuppliers(sups || []);
-      setMedicines(meds || []);
+      const alerts = await apiRequest<any[]>('/purchases/early-discount-alerts').catch(() => []);
       setEarlyDiscountAlerts(alerts || []);
     } catch (err: any) {
       console.error(err);
@@ -141,128 +106,6 @@ export const PurchasesView: React.FC = () => {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // Handle medicine search for line item
-  useEffect(() => {
-    if (!itemSearch || itemSearch.length < 2) {
-      setFilteredMedicines([]);
-      return;
-    }
-    const q = itemSearch.toLowerCase();
-    const filtered = medicines.filter(
-      (m) =>
-        m.tradeName?.toLowerCase().includes(q) ||
-        m.scientificName?.toLowerCase().includes(q) ||
-        m.barcode?.includes(q),
-    );
-    setFilteredMedicines(filtered.slice(0, 8));
-  }, [itemSearch, medicines]);
-
-  const handleSelectMed = (med: any) => {
-    setSelectedMed(med);
-    setItemSearch(med.tradeName);
-    setItemPurchasePrice(Number(med.defaultPurchasePrice || 0));
-    setItemSellingPrice(Number(med.defaultSellingPrice || 0));
-    setFilteredMedicines([]);
-  };
-
-  const addItemToInvoice = () => {
-    if (!selectedMed) {
-      alert('يرجى اختيار الدواء أولاً');
-      return;
-    }
-    if (!itemExpiry) {
-      alert('يرجى تحديد تاريخ انتهاء الصلاحية');
-      return;
-    }
-    if (itemQtyPacks <= 0) {
-      alert('يرجى إدخال كمية صحيحة');
-      return;
-    }
-
-    const newItem: PurchaseInvoiceItem = {
-      medicineId: selectedMed.id,
-      tradeName: selectedMed.tradeName,
-      scientificName: selectedMed.scientificName,
-      batchNumber: itemBatch || undefined,
-      expiryDate: itemExpiry,
-      quantityPacks: Number(itemQtyPacks),
-      unitsPerPack: Number(selectedMed.unitsPerPack || 1),
-      purchasePricePack: Number(itemPurchasePrice),
-      sellingPricePack: Number(itemSellingPrice),
-      totalCost: Number(itemQtyPacks) * Number(itemPurchasePrice),
-    };
-
-    setInvoiceItems([...invoiceItems, newItem]);
-
-    // Reset item input
-    setSelectedMed(null);
-    setItemSearch('');
-    setItemBatch('');
-    setItemExpiry('');
-    setItemQtyPacks(1);
-    setItemPurchasePrice(0);
-    setItemSellingPrice(0);
-  };
-
-  const removeItemFromInvoice = (index: number) => {
-    setInvoiceItems(invoiceItems.filter((_, i) => i !== index));
-  };
-
-  const totalInvoiceAmount = invoiceItems.reduce(
-    (sum, it) => sum + (it.quantityPacks * it.purchasePricePack),
-    0,
-  );
-
-  const handleCreateInvoice = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!invoiceNumber.trim()) {
-      alert('يرجى إدخال رقم الفاتورة');
-      return;
-    }
-    if (invoiceItems.length === 0) {
-      alert('يرجى إضافة مادة واحدة على الأقل في الفاتورة');
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const sup = suppliers.find((s) => s.id === selectedSupplierId);
-      const res = await apiRequest<any>('/purchases', {
-        method: 'POST',
-        body: JSON.stringify({
-          invoiceNumber: invoiceNumber.trim(),
-          supplierId: selectedSupplierId || undefined,
-          supplierName: sup ? sup.name : supplierName.trim() || undefined,
-          invoiceDate,
-          totalAmount: totalInvoiceAmount,
-          paidAmount: Number(paidAmount) || 0,
-          notes: notes.trim() || undefined,
-          earlyDiscountDays: earlyDiscountDays !== '' ? Number(earlyDiscountDays) : undefined,
-          earlyDiscountPercent: earlyDiscountPercent !== '' ? Number(earlyDiscountPercent) : undefined,
-          items: invoiceItems,
-        }),
-      });
-
-      setMessage({ type: 'success', text: res.message || 'تم حفظ فاتورة الشراء بنجاح' });
-      setShowNewModal(false);
-      // Reset form
-      setInvoiceNumber('');
-      setSelectedSupplierId('');
-      setSupplierName('');
-      setPaidAmount(0);
-      setNotes('');
-      setEarlyDiscountDays('');
-      setEarlyDiscountPercent('');
-      setInvoiceItems([]);
-      fetchInvoices();
-      fetchInitialData();
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'فشل حفظ فاتورة الشراء' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const openInvoiceDetails = async (invoice: PurchaseInvoice) => {
     try {
       const full = await apiRequest<PurchaseInvoice>(`/purchases/${invoice.id}`);
@@ -281,30 +124,19 @@ export const PurchasesView: React.FC = () => {
             <FileText className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-lg font-black text-slate-800">أرشيف وفواتير المشتريات</h1>
-            <p className="text-xs text-slate-500 font-medium">
-              توثيق فواتير الشراء الواردة من المذاخر والموردين وتحديث المخزون آلياً
-            </p>
+            <h1 className="text-lg font-black text-slate-800">المشتريات</h1>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           <button
             onClick={() => setShowAiScanModal(true)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-linear-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-900/20 active:scale-95 transition-all cursor-pointer"
-            title="تصوير وقراءة فاتورة المذخر الورقية بالذكاء الاصطناعي وترحيلها"
+            className="flex items-center gap-2 px-5 py-2.5 bg-linear-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-900/20 active:scale-95 transition-all cursor-pointer"
+            title="مسح فاتورة الشراء بالكاميرا"
           >
             <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
             <Camera className="w-4 h-4" />
-            <span>تصوير ومسح بالذكاء الاصطناعي (AI OCR)</span>
-          </button>
-
-          <button
-            onClick={() => setShowNewModal(true)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black shadow-xs active:scale-95 transition-all cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>إدخال يدوي</span>
+            <span>مسح فاتورة (كاميرا) 📷</span>
           </button>
         </div>
       </div>
@@ -373,12 +205,12 @@ export const PurchasesView: React.FC = () => {
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="بحث برقم الفاتورة أو اسم المذخر / المورد..."
+            placeholder="بحث برقم الفاتورة أو المذخر..."
             className="w-full pr-9 pl-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:border-blue-500"
           />
         </div>
         <div className="text-xs font-bold text-slate-500 shrink-0">
-          إجمالي الفواتير: <span className="text-slate-900 font-black">{invoices.length}</span>
+          الفواتير: <span className="text-slate-900 font-black">{invoices.length}</span>
         </div>
       </div>
 
@@ -389,14 +221,14 @@ export const PurchasesView: React.FC = () => {
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
               <tr>
                 <th className="p-3.5">رقم الفاتورة</th>
-                <th className="p-3.5">المذخر / المورد</th>
-                <th className="p-3.5">تاريخ الفاتورة</th>
-                <th className="p-3.5">عدد المواد</th>
-                <th className="p-3.5">إجمالي المبلغ</th>
-                <th className="p-3.5">المدفوع</th>
-                <th className="p-3.5">المتبقي (الآجل)</th>
-                <th className="p-3.5">خصم السداد المبكر</th>
-                <th className="p-3.5 text-center">الإجراءات</th>
+                <th className="p-3.5">المذخر</th>
+                <th className="p-3.5">التاريخ</th>
+                <th className="p-3.5">المواد</th>
+                <th className="p-3.5">المجموع</th>
+                <th className="p-3.5">الواصل</th>
+                <th className="p-3.5">الباقي</th>
+                <th className="p-3.5">خصم الدفع</th>
+                <th className="p-3.5 text-center">إجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
@@ -404,14 +236,14 @@ export const PurchasesView: React.FC = () => {
                 <tr>
                   <td colSpan={9} className="text-center py-10 text-slate-400">
                     <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-500" />
-                    جاري تحميل فواتير الشراء...
+                    جاري التحميل...
                   </td>
                 </tr>
               ) : invoices.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="text-center py-12 text-slate-400">
                     <Package className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-[1.5]" />
-                    لا توجد فواتير شراء مسجلة حالياً.
+                    لا توجد فواتير
                   </td>
                 </tr>
               ) : (
@@ -471,7 +303,7 @@ export const PurchasesView: React.FC = () => {
                         className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5" />
-                        <span>عرض التفاصيل</span>
+                        <span>تفاصيل</span>
                       </button>
                     </td>
                   </tr>
@@ -592,359 +424,6 @@ export const PurchasesView: React.FC = () => {
         </div>
       )}
 
-      {/* New Purchase Invoice Modal */}
-      {showNewModal && (
-        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-6 max-w-4xl w-full shadow-2xl border border-slate-200 max-h-[92vh] flex flex-col space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 shrink-0">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-black">
-                  <Plus className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-black text-base text-slate-900">تسجيل فاتورة شراء جديدة</h3>
-                  <p className="text-xs text-slate-400">إدخال بضاعة من المذخر مع تحديث رصيد المورد والمخزن</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowNewModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateInvoice} className="flex-1 overflow-y-auto space-y-4 pr-1">
-              {/* Invoice Header Details */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-200 text-xs">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">رقم الفاتورة *</label>
-                  <input
-                    type="text"
-                    required
-                    value={invoiceNumber}
-                    onChange={(e) => setInvoiceNumber(e.target.value)}
-                    placeholder="مثال: INV-2026-001"
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl font-mono font-bold text-slate-900 focus:outline-hidden focus:border-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">المذخر / المورد</label>
-                  <select
-                    value={selectedSupplierId}
-                    onChange={(e) => {
-                      setSelectedSupplierId(e.target.value);
-                      const sup = suppliers.find((s) => s.id === e.target.value);
-                      if (sup) setSupplierName(sup.name);
-                    }}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl font-bold text-slate-800 focus:outline-hidden focus:border-blue-500"
-                  >
-                    <option value="">-- اختر مورد مسجل أو اكتب اسمه --</option>
-                    {suppliers.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} (رصيده: {Number(s.currentBalance || 0).toLocaleString()} د.ع)
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">تاريخ الفاتورة</label>
-                  <input
-                    type="date"
-                    value={invoiceDate}
-                    onChange={(e) => setInvoiceDate(e.target.value)}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 focus:outline-hidden focus:border-blue-500"
-                  />
-                </div>
-              </div>
-
-              {/* Early Settlement Discount Settings */}
-              <div className="p-4 bg-amber-50/60 rounded-2xl border border-amber-200/80 space-y-2.5">
-                <div className="text-xs font-black text-amber-950 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-600" />
-                  <span>شروط خُصومات التسديد المبكر للمذخر (مثلاً: خصم 4% عند التسديد خلال شهرين):</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">مهلة التسديد للحصول على الخصم (بالأيام)</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={earlyDiscountDays}
-                      onChange={(e) => setEarlyDiscountDays(e.target.value ? Number(e.target.value) : '')}
-                      placeholder="مثلاً: 60 (خلال 60 يوم)"
-                      className="w-full p-2.5 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-hidden focus:border-amber-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">نسبة الخصم المشروطة %</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0.1"
-                      max="100"
-                      value={earlyDiscountPercent}
-                      onChange={(e) => setEarlyDiscountPercent(e.target.value ? Number(e.target.value) : '')}
-                      placeholder="مثلاً: 4%"
-                      className="w-full p-2.5 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-hidden focus:border-amber-500"
-                    />
-                  </div>
-                </div>
-
-                {earlyDiscountDays !== '' && earlyDiscountPercent !== '' && totalInvoiceAmount > 0 && (
-                  <div className="p-2.5 bg-white rounded-xl border border-amber-200 text-xs font-bold text-amber-900 flex items-center justify-between flex-wrap gap-2">
-                    <span>
-                      💡 مهلة الخصم تستمر حتى تاريخ:{' '}
-                      <span className="font-mono text-blue-700">
-                        {new Date(new Date(invoiceDate).getTime() + Number(earlyDiscountDays) * 86400000).toLocaleDateString('ar-IQ')}
-                      </span>
-                    </span>
-                    <span className="text-emerald-700 font-black">
-                      مبلغ الخصم المتوقع عند التسديد: {Math.round(totalInvoiceAmount * (Number(earlyDiscountPercent) / 100)).toLocaleString()} د.ع
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Add Medicine Line Item Box */}
-              <div className="p-4 bg-blue-50/50 rounded-2xl border border-blue-200/80 space-y-3">
-                <div className="text-xs font-black text-blue-900 flex items-center gap-1.5">
-                  <Plus className="w-4 h-4 text-blue-600" />
-                  إضافة دواء إلى الفاتورة:
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 text-xs">
-                  {/* Medicine Search */}
-                  <div className="sm:col-span-2 relative">
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="font-bold text-slate-700">اسم الدواء *</label>
-                      <button
-                        type="button"
-                        onClick={() => setShowAddMedModal(true)}
-                        className="text-[11px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
-                      >
-                        <Plus className="w-3 h-3" />
-                        <span>تسجيل دواء جديد</span>
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={itemSearch}
-                      onChange={(e) => {
-                        setItemSearch(e.target.value);
-                        setSelectedMed(null);
-                      }}
-                      placeholder="ابحث بالاسم أو الباركود..."
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-hidden focus:border-blue-500"
-                    />
-                    {itemSearch.trim().length >= 2 && (
-                      <div className="absolute top-full right-0 left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-20 max-h-48 overflow-y-auto">
-                        {filteredMedicines.length > 0 ? (
-                          filteredMedicines.map((m) => (
-                            <div
-                              key={m.id}
-                              onClick={() => handleSelectMed(m)}
-                              className="p-2.5 hover:bg-blue-50 cursor-pointer border-b border-slate-100 last:border-0 flex items-center justify-between"
-                            >
-                              <div>
-                                <div className="font-bold text-slate-900">{m.tradeName}</div>
-                                <div className="text-[10px] text-slate-400">{m.scientificName}</div>
-                              </div>
-                              <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                                اختيار
-                              </span>
-                            </div>
-                          ))
-                        ) : (
-                          <div className="p-3 text-center space-y-1.5">
-                            <div className="text-xs text-slate-500 font-bold">لم يتم العثور على الدواء</div>
-                            <button
-                              type="button"
-                              onClick={() => setShowAddMedModal(true)}
-                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                              <span>تسجيل كدواء جديد</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">رقم الوجبة (Batch)</label>
-                    <input
-                      type="text"
-                      value={itemBatch}
-                      onChange={(e) => setItemBatch(e.target.value)}
-                      placeholder="اختياري"
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 focus:outline-hidden focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">تاريخ الانتهاء *</label>
-                    <input
-                      type="date"
-                      value={itemExpiry}
-                      onChange={(e) => setItemExpiry(e.target.value)}
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 focus:outline-hidden focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">الكمية (علب) *</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={itemQtyPacks}
-                      onChange={(e) => setItemQtyPacks(Number(e.target.value))}
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-bold text-slate-900 focus:outline-hidden focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">سعر الشراء للعلبة *</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={itemPurchasePrice}
-                      onChange={(e) => setItemPurchasePrice(Number(e.target.value))}
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono font-bold text-slate-900 focus:outline-hidden focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">سعر البيع للعلبة *</label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={itemSellingPrice}
-                      onChange={(e) => setItemSellingPrice(Number(e.target.value))}
-                      className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono font-bold text-emerald-700 focus:outline-hidden focus:border-blue-500"
-                    />
-                  </div>
-
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={addItemToInvoice}
-                      className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-all shadow-xs cursor-pointer"
-                    >
-                      إضافة للجدول +
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Added Items Table */}
-              <div className="border border-slate-200 rounded-2xl overflow-hidden">
-                <table className="w-full text-right text-xs">
-                  <thead className="bg-slate-100 text-slate-700 font-bold">
-                    <tr>
-                      <th className="p-2.5">الدواء</th>
-                      <th className="p-2.5">الوجبة</th>
-                      <th className="p-2.5">الصلاحية</th>
-                      <th className="p-2.5">الكمية</th>
-                      <th className="p-2.5">سعر الشراء</th>
-                      <th className="p-2.5">سعر البيع</th>
-                      <th className="p-2.5">الإجمالي</th>
-                      <th className="p-2.5 text-center">حذف</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {invoiceItems.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="text-center py-6 text-slate-400">
-                          لم تقم بإضافة أي أدوية بعد
-                        </td>
-                      </tr>
-                    ) : (
-                      invoiceItems.map((it, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50">
-                          <td className="p-2.5 font-bold text-slate-900">{it.tradeName}</td>
-                          <td className="p-2.5 font-mono text-slate-600">{it.batchNumber || '—'}</td>
-                          <td className="p-2.5 font-mono">{it.expiryDate}</td>
-                          <td className="p-2.5 font-bold">{it.quantityPacks} علبة</td>
-                          <td className="p-2.5 font-mono">{it.purchasePricePack.toLocaleString()} د.ع</td>
-                          <td className="p-2.5 font-mono text-emerald-700 font-bold">
-                            {it.sellingPricePack.toLocaleString()} د.ع
-                          </td>
-                          <td className="p-2.5 font-mono font-black">
-                            {(it.quantityPacks * it.purchasePricePack).toLocaleString()} د.ع
-                          </td>
-                          <td className="p-2.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => removeItemFromInvoice(idx)}
-                              className="text-rose-500 hover:text-rose-700 p-1 cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Payment Summary */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-200 text-xs">
-                <div>
-                  <label className="block font-bold text-slate-600 mb-1">إجمالي الفاتورة</label>
-                  <div className="text-base font-black text-slate-900 font-mono">
-                    {totalInvoiceAmount.toLocaleString()} د.ع
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">المبلغ المسدد نقداً</label>
-                  <input
-                    type="number"
-                    min="0"
-                    max={totalInvoiceAmount}
-                    value={paidAmount}
-                    onChange={(e) => setPaidAmount(Number(e.target.value))}
-                    className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono font-bold text-emerald-700 focus:outline-hidden focus:border-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-600 mb-1">المتبقي (ديون على الصيدلية)</label>
-                  <div className="text-base font-black text-rose-600 font-mono">
-                    {Math.max(0, totalInvoiceAmount - paidAmount).toLocaleString()} د.ع
-                  </div>
-                </div>
-              </div>
-
-              {/* Submit Buttons */}
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowNewModal(false)}
-                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
-                >
-                  إلغاء
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving || invoiceItems.length === 0}
-                  className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-black shadow-xs active:scale-95 transition-all cursor-pointer flex items-center gap-1.5"
-                >
-                  {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                  <span>حفظ وتحديث المخزون</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
       {/* Smart AI OCR Invoice Scanner Modal */}
       {showAiScanModal && (
         <SmartInvoiceScannerModal
@@ -956,18 +435,6 @@ export const PurchasesView: React.FC = () => {
               text: `تم بنجاح قراءة واعتماد فاتورة المذخر (${savedInvoice.invoiceNumber || 'رقم جديد'}) وترحيل الأدوية للمخزن`,
             });
             fetchInvoices();
-          }}
-        />
-      )}
-
-      {/* Add Unregistered Medicine Modal */}
-      {showAddMedModal && (
-        <AddUnregisteredMedicineModal
-          initialSearch={itemSearch}
-          onClose={() => setShowAddMedModal(false)}
-          onSuccess={(newMed) => {
-            setMedicines((prev) => [newMed, ...prev]);
-            handleSelectMed(newMed);
           }}
         />
       )}

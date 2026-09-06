@@ -88,8 +88,8 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
           <div className="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-xs">
             <Pill className="w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام دوائي SaaS</h1>
-          <p className="text-xs text-slate-500 mt-1">إدارة الصيدليات والبحث الشبكي المركزي</p>
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام دوائي</h1>
+          <p className="text-xs text-slate-500 mt-1">إدارة الصيدليات</p>
         </div>
 
         {/* Tab Switcher */}
@@ -106,7 +106,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
             }`}
           >
             <Building2 className="w-3.5 h-3.5" />
-            دخول الصيدلية
+            الصيدلية
           </button>
           <button
             onClick={() => {
@@ -120,7 +120,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5" />
-            إدارة النظام (Admin)
+            الإدارة
           </button>
         </div>
 
@@ -135,7 +135,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
         {activeTab === 'PHARMACY' ? (
           <form onSubmit={handlePharmacyLogin} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">معرف الصيدلية (Slug)</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">معرف الصيدلية</label>
               <div className="relative">
                 <Building2 className="w-4 h-4 absolute right-3 top-3 text-slate-400" />
                 <input
@@ -143,7 +143,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
                   required
                   value={pharmacySlug}
                   onChange={(e) => setPharmacySlug(e.target.value)}
-                  placeholder="pharmacy_al_hikma"
+                  placeholder="pharmacy_baghdad_1"
                   className="w-full pr-9 pl-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                 />
               </div>
@@ -158,7 +158,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
                   required
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="ali_cashier"
+                  placeholder="اسم المستخدم"
                   className="w-full pr-9 pl-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
                 />
               </div>
@@ -182,16 +182,16 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl font-bold text-sm shadow-md transition-all active:scale-95"
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl font-bold text-sm shadow-md transition-all active:scale-95 cursor-pointer"
             >
-              {loading ? 'جاري التحقق والدخول...' : 'دخول إلى نظام الصيدلية'}
+              {loading ? 'جاري الدخول...' : 'تسجيل الدخول'}
             </button>
           </form>
         ) : (
           /* Super Admin Login Form */
           <form onSubmit={handleAdminLogin} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">اسم مستخدم المدير</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">اسم المستخدم</label>
               <div className="relative">
                 <ShieldCheck className="w-4 h-4 absolute right-3 top-3 text-slate-400" />
                 <input
@@ -205,7 +205,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">كلمة مرور المدير العام</label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">كلمة المرور</label>
               <div className="relative">
                 <Lock className="w-4 h-4 absolute right-3 top-3 text-slate-400" />
                 <input
@@ -221,9 +221,9 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl font-bold text-sm shadow-md transition-all active:scale-95"
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl font-bold text-sm shadow-md transition-all active:scale-95 cursor-pointer"
             >
-              {loading ? 'جاري الدخول...' : 'دخول إلى لوحة Super Admin'}
+              {loading ? 'جاري الدخول...' : 'دخول الإدارة'}
             </button>
           </form>
         )}
@@ -236,7 +236,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigate
               className="text-xs font-bold text-slate-500 hover:text-emerald-600 flex items-center justify-center gap-1.5 mx-auto transition-colors cursor-pointer"
             >
               <Search className="w-3.5 h-3.5" />
-              <span>الذهاب إلى محرك البحث الدوائي للجمهور</span>
+              <span>بحث الأدوية للجمهور</span>
             </button>
           </div>
         )}

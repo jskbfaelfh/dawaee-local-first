@@ -140,6 +140,9 @@ export class InventoryService {
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS address TEXT;
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS company_name VARCHAR(255);
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS balance_due DECIMAL(12, 2) DEFAULT 0;
+        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5, 2) DEFAULT 0;
+        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12, 2) DEFAULT 0;
+        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS net_paid_amount DECIMAL(12, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255);
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_days INT;
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_percent DECIMAL(5, 2);
@@ -348,6 +351,9 @@ END $$;`;
         id,
         purchase_id as "purchaseId",
         amount,
+        COALESCE(discount_percent, 0)::numeric as "discountPercent",
+        COALESCE(discount_amount, 0)::numeric as "discountAmount",
+        COALESCE(net_paid_amount, amount)::numeric as "netPaidAmount",
         payment_date as "paymentDate",
         payment_method as "paymentMethod",
         receipt_number as "receiptNumber",
@@ -402,21 +408,42 @@ END $$;`;
       throw new BadRequestException('مبلغ الدفعة يجب أن يكون أكبر من صفر');
     }
 
+    // Process discount fields
+    const discountPercent = Number(dto.discountPercent || 0);
+    let discountAmount = Number(dto.discountAmount || 0);
+    if (discountAmount <= 0 && discountPercent > 0) {
+      discountAmount = Math.round((payAmount * discountPercent) / 100);
+    }
+    const netPaidAmount = Number(
+      dto.netPaidAmount !== undefined
+        ? dto.netPaidAmount
+        : Math.max(0, payAmount - discountAmount),
+    );
+
+    let finalNotes = dto.notes ? dto.notes.trim() : '';
+    if (discountAmount > 0) {
+      const discountLabel = `(خصم تسديد: ${discountPercent}% بقيمة ${discountAmount.toLocaleString()} د.ع | الصافي المدفوع: ${netPaidAmount.toLocaleString()} د.ع)`;
+      finalNotes = finalNotes ? `${finalNotes} - ${discountLabel}` : discountLabel;
+    }
+
     // 2. Insert Payment Voucher Record
     const paymentId = crypto.randomUUID();
     const payDate = dto.paymentDate || new Date().toISOString().slice(0, 10);
 
     await this.prisma.$executeRawUnsafe(
       `INSERT INTO "${schemaName}".supplier_payments
-       (id, supplier_id, amount, payment_date, payment_method, receipt_number, notes, created_at)
-       VALUES ($1::uuid, $2::uuid, $3, $4::date, $5, $6, $7, NOW())`,
+       (id, supplier_id, amount, discount_percent, discount_amount, net_paid_amount, payment_date, payment_method, receipt_number, notes, created_at)
+       VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, NOW())`,
       paymentId,
       supplierId,
       payAmount,
+      discountPercent,
+      discountAmount,
+      netPaidAmount,
       payDate,
       dto.paymentMethod || 'CASH',
       dto.receiptNumber || null,
-      dto.notes || null,
+      finalNotes || null,
     );
 
     // 3. Deduct payment from unpaid purchases using FIFO
@@ -452,6 +479,20 @@ END $$;`;
         p.id,
       );
 
+      // Also keep purchase_invoices in sync
+      try {
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE "${schemaName}".purchase_invoices
+           SET paid_amount = $1,
+               remaining_amount = $2,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $3::uuid`,
+          newPaid,
+          newRemaining,
+          p.id,
+        );
+      } catch {}
+
       remainingToDeduct -= deductFromThis;
     }
 
@@ -461,7 +502,10 @@ END $$;`;
 
     return {
       success: true,
-      message: `تم توثيق تسديد دفعة بمبلغ (${payAmount.toLocaleString()} د.ع) لمذخر (${supplier.name}) بنجاح`,
+      message:
+        discountAmount > 0
+          ? `تم توثيق تسديد بمبلغ (${payAmount.toLocaleString()} د.ع) مع خصم مكتسب (${discountAmount.toLocaleString()} د.ع) - الصافي المدفوع: (${netPaidAmount.toLocaleString()} د.ع) لمذخر (${supplier.name}) بنجاح`
+          : `تم توثيق تسديد دفعة بمبلغ (${payAmount.toLocaleString()} د.ع) لمذخر (${supplier.name}) بنجاح`,
       paymentId,
     };
   }
@@ -562,6 +606,15 @@ END $$;`;
     // Process each item in the invoice
     for (const item of dto.items) {
       let finalMedicineId = item.medicineId;
+      if (finalMedicineId) {
+        const check = await this.prisma.$queryRawUnsafe<any[]>(
+          `SELECT id FROM public.medicines WHERE id = $1::uuid LIMIT 1;`,
+          finalMedicineId,
+        );
+        if (check.length === 0) {
+          finalMedicineId = undefined;
+        }
+      }
 
       // 1.1 If item is a new medicine not in catalog -> create in Master DB
       if (!finalMedicineId && item.newMedicineData) {
@@ -600,15 +653,33 @@ END $$;`;
 
       // 1.4 Upsert Inventory Item in Tenant Schema
       const existingItems: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT id FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1`,
+        `SELECT id, units_per_pack as "unitsPerPack", selling_price_pack as "sellingPricePack", selling_price_unit as "sellingPriceUnit", shelf_location as "shelfLocation"
+         FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1`,
         finalMedicineId,
       );
 
       let inventoryItemId: string;
+      const existing = existingItems[0] || null;
+      const resolvedUnits = Number(
+        item.unitsPerPack > 1 ? item.unitsPerPack : existing?.unitsPerPack || 1,
+      );
+      const resolvedSellingPack = Number(
+        item.sellingPricePack > 0 ? item.sellingPricePack : existing?.sellingPricePack || 0,
+      );
+      let resolvedSellingUnit = Number(
+        item.sellingPriceUnit > 0 ? item.sellingPriceUnit : existing?.sellingPriceUnit || 0,
+      );
+      if (resolvedSellingUnit <= 0 && resolvedSellingPack > 0 && resolvedUnits > 0) {
+        resolvedSellingUnit = Math.round(resolvedSellingPack / resolvedUnits);
+      }
+      const resolvedShelf =
+        item.shelfLocation && item.shelfLocation.trim().length > 0
+          ? item.shelfLocation.trim()
+          : existing?.shelfLocation || null;
 
-      if (existingItems.length > 0) {
-        inventoryItemId = existingItems[0].id;
-        // Update custom_name, selling prices, units per pack, and shelf_location
+      if (existing) {
+        inventoryItemId = existing.id;
+        // Update custom_name, selling prices, units per pack, and shelf_location safely
         await this.prisma.$executeRawUnsafe(
           `UPDATE "${schemaName}".inventory_items
            SET custom_name = COALESCE($1, custom_name),
@@ -620,11 +691,11 @@ END $$;`;
                updated_at = NOW()
            WHERE id = $7::uuid`,
           item.customName || null,
-          item.unitsPerPack,
-          item.sellingPricePack,
-          item.sellingPriceUnit,
+          resolvedUnits,
+          resolvedSellingPack,
+          resolvedSellingUnit,
           item.minAlertUnits || 5,
-          item.shelfLocation || null,
+          resolvedShelf,
           inventoryItemId,
         );
       } else {
@@ -636,16 +707,16 @@ END $$;`;
           inventoryItemId,
           finalMedicineId,
           item.customName || null,
-          item.unitsPerPack,
-          item.sellingPricePack,
-          item.sellingPriceUnit,
+          resolvedUnits,
+          resolvedSellingPack,
+          resolvedSellingUnit,
           item.minAlertUnits || 5,
-          item.shelfLocation || null,
+          resolvedShelf,
         );
       }
 
       // 1.5 Insert Batch Record into Tenant Schema (Includes Quantity + Bonus!)
-      const totalUnits = totalPacksReceived * item.unitsPerPack;
+      const totalUnits = totalPacksReceived * resolvedUnits;
       const batchId = crypto.randomUUID();
 
       await this.prisma.$executeRawUnsafe(
@@ -658,8 +729,8 @@ END $$;`;
         purchaseId,
         item.batchNumber || null,
         Math.round(effectiveNetCostPerPack),
-        item.sellingPricePack,
-        item.sellingPriceUnit,
+        resolvedSellingPack,
+        resolvedSellingUnit,
         totalUnits,
         expiryDateStr,
       );
@@ -817,15 +888,16 @@ END $$;`;
         i.min_alert_units as "minAlertUnits",
         COALESCE(i.is_public_visible, TRUE) as "isPublicVisible",
         i.updated_at as "updatedAt",
-        m.trade_name as "tradeName",
-        m.scientific_name as "scientificName",
-        m.dosage_form as "dosageForm",
-        m.strength as "strength",
-        m.manufacturer as "manufacturer",
-        m.barcode as "barcode",
+        COALESCE(i.custom_name, m.trade_name, 'دواء بدون اسم') as "tradeName",
+        COALESCE(m.scientific_name, i.custom_name, '') as "scientificName",
+        COALESCE(m.dosage_form, 'عام') as "dosageForm",
+        COALESCE(m.strength, '') as "strength",
+        COALESCE(m.manufacturer, '') as "manufacturer",
         COALESCE(SUM(b.quantity_units_remaining), 0)::int as "totalUnitsRemaining",
-        FLOOR(COALESCE(SUM(b.quantity_units_remaining), 0) / i.units_per_pack)::int as "availablePacks",
-        (COALESCE(SUM(b.quantity_units_remaining), 0) % i.units_per_pack)::int as "availableStrips",
+        COALESCE(SUM(CASE WHEN b.expiry_date >= CURRENT_DATE AND (b.is_recalled IS FALSE OR b.is_recalled IS NULL) THEN b.quantity_units_remaining ELSE 0 END), 0)::int as "validUnitsRemaining",
+        COALESCE(SUM(CASE WHEN b.expiry_date < CURRENT_DATE THEN b.quantity_units_remaining ELSE 0 END), 0)::int as "expiredUnitsRemaining",
+        FLOOR(COALESCE(SUM(CASE WHEN b.expiry_date >= CURRENT_DATE AND (b.is_recalled IS FALSE OR b.is_recalled IS NULL) THEN b.quantity_units_remaining ELSE 0 END), 0) / i.units_per_pack)::int as "availablePacks",
+        (COALESCE(SUM(CASE WHEN b.expiry_date >= CURRENT_DATE AND (b.is_recalled IS FALSE OR b.is_recalled IS NULL) THEN b.quantity_units_remaining ELSE 0 END), 0) % i.units_per_pack)::int as "availableStrips",
         (
           SELECT json_agg(
             json_build_object(
@@ -847,15 +919,180 @@ END $$;`;
             AND (b_agg.is_recalled IS FALSE OR b_agg.is_recalled IS NULL)
         ) as "activeBatches"
       FROM "${schemaName}".inventory_items i
-      JOIN public.medicines m ON i.medicine_id = m.id
+      LEFT JOIN public.medicines m ON i.medicine_id = m.id
       LEFT JOIN "${schemaName}".inventory_batches b ON i.id = b.inventory_item_id AND b.quantity_units_remaining > 0
       WHERE 1=1 ${searchFilter}
-      GROUP BY i.id, m.id
-      ORDER BY m.trade_name ASC;
+      GROUP BY i.id, m.id, m.trade_name, m.scientific_name, m.dosage_form, m.strength, m.manufacturer, m.barcode
+      ORDER BY COALESCE(i.custom_name, m.trade_name, '') ASC;
     `;
 
     const items: any[] = await this.prisma.$queryRawUnsafe(sql, ...params);
     return items;
+  }
+
+  /**
+   * Get last known batch/pricing/shelf/expiry history for a medicine in the current tenant's pharmacy
+   * Used for auto-prefilling fast stock entry (BulkStockEntry, SmartInvoiceScanner, etc.)
+   * Fetches latest record with the same barcode or medicine ID
+   */
+  async getMedicineLastHistory(identifier: string) {
+    const schemaName = this.tenantContext.getSchemaName();
+    await this.ensurePurchaseTablesExist(schemaName);
+
+    const cleanId = String(identifier || '').trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanId);
+
+    // 1. Fetch medicine from master catalog (by ID or Barcode)
+    let masterRes: any[] = [];
+    if (isUuid) {
+      masterRes = await this.prisma.$queryRawUnsafe(
+        `SELECT id, trade_name as "tradeName", scientific_name as "scientificName", 
+                strength, dosage_form as "dosageForm", 
+                COALESCE(default_units_per_pack, 1)::int as "unitsPerPack",
+                COALESCE(default_purchase_price, 0)::numeric as "defaultPurchasePrice",
+                barcode
+         FROM public.medicines 
+         WHERE id = $1::uuid OR barcode = $1
+         LIMIT 1`,
+        cleanId,
+      );
+    } else {
+      masterRes = await this.prisma.$queryRawUnsafe(
+        `SELECT id, trade_name as "tradeName", scientific_name as "scientificName", 
+                strength, dosage_form as "dosageForm", 
+                COALESCE(default_units_per_pack, 1)::int as "unitsPerPack",
+                COALESCE(default_purchase_price, 0)::numeric as "defaultPurchasePrice",
+                barcode
+         FROM public.medicines 
+         WHERE barcode = $1 OR trade_name ILIKE $1
+         LIMIT 1`,
+        cleanId,
+      );
+    }
+
+    const master = masterRes[0] || null;
+    const barcode = master?.barcode || (!isUuid ? cleanId : null);
+    const medId = master?.id || (isUuid ? cleanId : null);
+
+    // 2. Query tenant inventory by medicine_id OR barcode!
+    // This guarantees matching the latest medicine in this pharmacy with the same barcode
+    const itemRes: any[] = await this.prisma.$queryRawUnsafe(`
+      SELECT ii.id, ii.medicine_id as "medicineId", ii.custom_name as "customName",
+             ii.units_per_pack as "unitsPerPack",
+             ii.selling_price_pack as "sellingPricePack",
+             ii.selling_price_unit as "sellingPriceUnit",
+             ii.shelf_location as "shelfLocation",
+             m.barcode, m.trade_name as "masterTradeName"
+      FROM "${schemaName}".inventory_items ii
+      LEFT JOIN public.medicines m ON ii.medicine_id = m.id
+      WHERE ($1::uuid IS NOT NULL AND ii.medicine_id = $1::uuid)
+         OR ($2::text IS NOT NULL AND m.barcode = $2::text)
+      ORDER BY ii.updated_at DESC
+      LIMIT 1;
+    `, medId, barcode);
+
+    let lastPurchase: any = null;
+    let lastBatch: any = null;
+    const inventoryItem = itemRes[0] || null;
+
+    if (inventoryItem) {
+      // 3. Try to get the latest purchase item
+      try {
+        const purchaseRes: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT purchase_price_pack as "purchasePricePack",
+                  selling_price_pack as "sellingPricePack",
+                  selling_price_unit as "sellingPriceUnit",
+                  bonus_packs as "bonusPacks",
+                  units_per_pack as "unitsPerPack",
+                  EXTRACT(MONTH FROM expiry_date)::int as "expiryMonth",
+                  EXTRACT(YEAR FROM expiry_date)::int as "expiryYear",
+                  batch_number as "batchNumber"
+           FROM "${schemaName}".purchase_items
+           WHERE inventory_item_id = $1::uuid
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          inventoryItem.id,
+        );
+        if (purchaseRes.length > 0) {
+          lastPurchase = purchaseRes[0];
+        }
+      } catch (e) {
+        // Ignored if purchase_items table is not yet used
+      }
+
+      // 4. Also check latest batch
+      try {
+        const batchRes: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT purchase_price_pack as "purchasePricePack",
+                  selling_price_pack as "sellingPricePack",
+                  selling_price_unit as "sellingPriceUnit",
+                  EXTRACT(MONTH FROM expiry_date)::int as "expiryMonth",
+                  EXTRACT(YEAR FROM expiry_date)::int as "expiryYear",
+                  batch_number as "batchNumber"
+           FROM "${schemaName}".inventory_batches
+           WHERE inventory_item_id = $1::uuid
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          inventoryItem.id,
+        );
+        if (batchRes.length > 0) {
+          lastBatch = batchRes[0];
+        }
+      } catch (e) {
+        // Ignored
+      }
+    }
+
+    const unitsPerPack = Number(
+      inventoryItem?.unitsPerPack || lastPurchase?.unitsPerPack || master?.unitsPerPack || 1,
+    );
+
+    const purchasePricePack = Number(
+      lastPurchase?.purchasePricePack ||
+        lastBatch?.purchasePricePack ||
+        master?.defaultPurchasePrice ||
+        0,
+    );
+
+    const sellingPricePack = Number(
+      inventoryItem?.sellingPricePack ||
+        lastPurchase?.sellingPricePack ||
+        lastBatch?.sellingPricePack ||
+        0,
+    );
+
+    let sellingPriceUnit = Number(
+      inventoryItem?.sellingPriceUnit ||
+        lastPurchase?.sellingPriceUnit ||
+        lastBatch?.sellingPriceUnit ||
+        0,
+    );
+    if (sellingPriceUnit === 0 && sellingPricePack > 0 && unitsPerPack > 0) {
+      sellingPriceUnit = Math.round(sellingPricePack / unitsPerPack);
+    }
+
+    const shelfLocation = inventoryItem?.shelfLocation ? String(inventoryItem.shelfLocation).trim() : '';
+    const bonusPacks = Number(lastPurchase?.bonusPacks || 0);
+    const expiryMonth = lastBatch?.expiryMonth || lastPurchase?.expiryMonth || null;
+    const expiryYear = lastBatch?.expiryYear || lastPurchase?.expiryYear || null;
+
+    return {
+      medicineId: master?.id || inventoryItem?.medicineId || cleanId,
+      tradeName: inventoryItem?.customName || master?.tradeName || 'دواء مسجل',
+      scientificName: master?.scientificName || '',
+      strength: master?.strength || '',
+      dosageForm: master?.dosageForm || '',
+      barcode: master?.barcode || barcode || '',
+      unitsPerPack,
+      purchasePricePack,
+      sellingPricePack,
+      sellingPriceUnit,
+      shelfLocation,
+      bonusPacks,
+      expiryMonth,
+      expiryYear,
+      hasPreviousBatch: !!(lastPurchase || lastBatch || inventoryItem),
+    };
   }
 
   /**
@@ -874,6 +1111,7 @@ END $$;`;
         b.quantity_units_remaining as "quantityUnitsRemaining",
         TO_CHAR(b.expiry_date, 'MM/YYYY') as "expiryFormatted",
         b.expiry_date as "expiryDate",
+        (b.expiry_date < CURRENT_DATE) as "isExpired",
         b.is_recalled as "isRecalled",
         b.supplier_id as "supplierId",
         b.purchase_id as "purchaseId",
@@ -1124,17 +1362,17 @@ END $$;`;
       SELECT 
         i.id,
         i.custom_name as "customName",
-        m.trade_name as "tradeName",
-        m.scientific_name as "scientificName",
+        COALESCE(i.custom_name, m.trade_name, 'دواء بدون اسم') as "tradeName",
+        COALESCE(m.scientific_name, i.custom_name, '') as "scientificName",
         i.units_per_pack as "unitsPerPack",
         i.min_alert_units as "minAlertUnits",
         COALESCE(SUM(b.quantity_units_remaining), 0)::int as "totalUnitsRemaining",
         FLOOR(COALESCE(SUM(b.quantity_units_remaining), 0) / i.units_per_pack)::int as "availablePacks",
         (COALESCE(SUM(b.quantity_units_remaining), 0) % i.units_per_pack)::int as "availableStrips"
       FROM "${schemaName}".inventory_items i
-      JOIN public.medicines m ON i.medicine_id = m.id
+      LEFT JOIN public.medicines m ON i.medicine_id = m.id
       LEFT JOIN "${schemaName}".inventory_batches b ON i.id = b.inventory_item_id
-      GROUP BY i.id, m.id
+      GROUP BY i.id, m.id, m.trade_name, m.scientific_name
       HAVING COALESCE(SUM(b.quantity_units_remaining), 0) <= i.min_alert_units
       ORDER BY COALESCE(SUM(b.quantity_units_remaining), 0) ASC;
     `;
@@ -1152,15 +1390,15 @@ END $$;`;
     const sql = `
       SELECT 
         b.id as "batchId",
-        m.trade_name as "tradeName",
-        m.scientific_name as "scientificName",
+        COALESCE(i.custom_name, m.trade_name, 'دواء بدون اسم') as "tradeName",
+        COALESCE(m.scientific_name, i.custom_name, '') as "scientificName",
         b.batch_number as "batchNumber",
         b.quantity_units_remaining as "quantityUnitsRemaining",
         TO_CHAR(b.expiry_date, 'MM/YYYY') as "expiryFormatted",
         b.expiry_date as "expiryDate"
       FROM "${schemaName}".inventory_batches b
       JOIN "${schemaName}".inventory_items i ON b.inventory_item_id = i.id
-      JOIN public.medicines m ON i.medicine_id = m.id
+      LEFT JOIN public.medicines m ON i.medicine_id = m.id
       WHERE b.quantity_units_remaining > 0 
         AND b.expiry_date <= (CURRENT_DATE + ($1 || ' months')::interval)
       ORDER BY b.expiry_date ASC;
@@ -1215,7 +1453,7 @@ END $$;`;
         END as "expiryTier"
       FROM "${schemaName}".inventory_batches b
       JOIN "${schemaName}".inventory_items i ON b.inventory_item_id = i.id
-      JOIN public.medicines m ON i.medicine_id = m.id
+      LEFT JOIN public.medicines m ON i.medicine_id = m.id
       LEFT JOIN "${schemaName}".suppliers s ON b.supplier_id = s.id
       LEFT JOIN "${schemaName}".purchases p ON b.purchase_id = p.id
       WHERE b.quantity_units_remaining > 0
@@ -1283,7 +1521,7 @@ END $$;`;
         s.name as "supplierName"
       FROM "${schemaName}".inventory_batches b
       JOIN "${schemaName}".inventory_items i ON b.inventory_item_id = i.id
-      JOIN public.medicines m ON i.medicine_id = m.id
+      LEFT JOIN public.medicines m ON i.medicine_id = m.id
       LEFT JOIN "${schemaName}".suppliers s ON b.supplier_id = s.id
       WHERE b.id = $1::uuid LIMIT 1;
     `, batchId);
@@ -1316,7 +1554,7 @@ END $$;`;
 
     // 3. Record supplier ledger adjustment if supplier exists
     if (batch.supplierId) {
-      // Record payment deduction in supplier_payments
+      // Record credit voucher in supplier_payments
       await this.prisma.$executeRawUnsafe(`
         INSERT INTO "${schemaName}".supplier_payments (
           id, supplier_id, purchase_id, amount, payment_date, payment_method, receipt_number, notes, created_at
@@ -1326,18 +1564,45 @@ END $$;`;
       `,
         batch.supplierId,
         batch.purchaseId || null,
-        -refundTotal,
+        refundTotal,
         voucherNumber,
         `سند إرجاع مواد للمذخر رقم ${voucherNumber} - دواء: ${batch.tradeName} (وجبة: ${batch.batchNumber}) - ${reason}`
       );
 
-      // Also if there's purchase record with remaining debt, deduct from remaining_amount
-      if (batch.purchaseId) {
+      // Deduct refund from unpaid purchases/invoices via FIFO:
+      // First try batch.purchaseId if it has debt, else all unpaid purchases of this supplier
+      const unpaidPurchases: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT id, remaining_amount, paid_amount
+         FROM "${schemaName}".purchases
+         WHERE supplier_id = $1::uuid AND remaining_amount > 0
+         ORDER BY CASE WHEN id = $2::uuid THEN 0 ELSE 1 END, created_at ASC`,
+        batch.supplierId,
+        batch.purchaseId || '00000000-0000-0000-0000-000000000000',
+      );
+
+      let remainingRefundToDeduct = refundTotal;
+      for (const p of unpaidPurchases) {
+        if (remainingRefundToDeduct <= 0) break;
+        const pRem = Number(p.remaining_amount || 0);
+        const deductAmt = Math.min(remainingRefundToDeduct, pRem);
+        const newRem = pRem - deductAmt;
+        const newStatus = newRem === 0 ? 'PAID' : 'PARTIAL';
+
         await this.prisma.$executeRawUnsafe(`
           UPDATE "${schemaName}".purchases
-          SET remaining_amount = GREATEST(0, remaining_amount - $1)
-          WHERE id = $2::uuid;
-        `, refundTotal, batch.purchaseId);
+          SET remaining_amount = $1, payment_status = $2
+          WHERE id = $3::uuid;
+        `, newRem, newStatus, p.id);
+
+        try {
+          await this.prisma.$executeRawUnsafe(`
+            UPDATE "${schemaName}".purchase_invoices
+            SET remaining_amount = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $2::uuid;
+          `, newRem, p.id);
+        } catch {}
+
+        remainingRefundToDeduct -= deductAmt;
       }
     }
 
@@ -1401,12 +1666,12 @@ END $$;`;
             LIMIT 1
           ) as "lastPurchasePricePack"
         FROM "${schemaName}".inventory_items i
-        JOIN public.medicines m ON i.medicine_id = m.id
+        LEFT JOIN public.medicines m ON i.medicine_id = m.id
         LEFT JOIN "${schemaName}".inventory_batches b ON i.id = b.inventory_item_id 
           AND b.quantity_units_remaining > 0
           AND b.expiry_date >= CURRENT_DATE 
           AND (b.is_recalled IS FALSE OR b.is_recalled IS NULL)
-        GROUP BY i.id, m.id
+        GROUP BY i.id, m.id, m.trade_name, m.scientific_name, m.dosage_form, m.strength, m.barcode, m.default_units_per_pack
       )
       SELECT 
         s.*,

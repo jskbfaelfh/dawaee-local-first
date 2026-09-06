@@ -80,11 +80,13 @@ export class ExpensesService {
     }
 
     if (startDate) {
-      whereClauses.push(`expense_date >= '${startDate}'`);
+      const cleanStart = startDate.includes(' ') ? startDate : `${startDate} 00:00:00`;
+      whereClauses.push(`expense_date >= '${cleanStart}'::timestamp`);
     }
 
     if (endDate) {
-      whereClauses.push(`expense_date <= '${endDate}'`);
+      const cleanEnd = endDate.includes(' ') ? endDate : `${endDate} 23:59:59`;
+      whereClauses.push(`expense_date <= '${cleanEnd}'::timestamp`);
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';

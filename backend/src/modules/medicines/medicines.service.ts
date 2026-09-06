@@ -446,7 +446,7 @@ export class MedicinesService {
       Return ONLY the JSON object. No backticks, no markdown.
     `;
 
-    const models = ['gemini-1.5-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-pro'];
+    const models = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-pro', 'gemini-pro-latest'];
     for (const model of models) {
       try {
         const response = await fetch(

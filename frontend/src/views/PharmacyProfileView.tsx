@@ -360,10 +360,10 @@ export const PharmacyProfileView: React.FC = () => {
 
         {/* License & Days Remaining Badge */}
         <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 text-right">
-          <div className="text-[11px] font-bold text-slate-500">رقم الترخيص (License Key)</div>
+          <div className="text-[11px] font-bold text-slate-500">رقم الترخيص</div>
           <div className="text-xs font-mono font-black text-slate-900">{profileData?.pharmacy?.licenseKey}</div>
           <div className="text-[11px] font-bold text-indigo-700 mt-1">
-            متبقي {profileData?.pharmacy?.daysRemaining} يوماً على التجديد
+            متبقي {profileData?.pharmacy?.daysRemaining} يوم
           </div>
         </div>
       </div>
@@ -392,10 +392,10 @@ export const PharmacyProfileView: React.FC = () => {
           <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs">
             <h3 className="font-black text-slate-900 text-base flex items-center gap-2 mb-3">
               <ImageIcon className="w-5 h-5 text-indigo-600" />
-              شعار الصيدلية (Logo)
+              شعار الصيدلية
             </h3>
             <p className="text-xs text-slate-500 mb-4">
-              يظهر الشعار في رأس النظام، وأعلى الفواتير المطبوعة للكاشير، وفي البحث العام.
+              يظهر في الفواتير المطبوعة والبحث العام
             </p>
 
             {/* Logo Preview Area */}
@@ -419,7 +419,7 @@ export const PharmacyProfileView: React.FC = () => {
               ) : (
                 <div className="text-center">
                   <ImageIcon className="w-12 h-12 text-slate-400 mx-auto mb-2" />
-                  <span className="text-xs font-bold text-slate-600 block">لا يوجد شعار مخصص</span>
+                  <span className="text-xs font-bold text-slate-600 block">لا يوجد شعار</span>
                   <span className="text-[10px] text-slate-400">PNG أو JPG (بحد أقصى 2MB)</span>
                 </div>
               )}
@@ -427,7 +427,7 @@ export const PharmacyProfileView: React.FC = () => {
 
             {/* Upload Button */}
             <label className="block w-full text-center py-2.5 px-4 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-black cursor-pointer transition-colors mb-2">
-              <span>{pharmacyForm.logoUrl ? '🔄 تغيير صورة الشعار' : '📁 رفع صورة الشعار من الجهاز'}</span>
+              <span>{pharmacyForm.logoUrl ? 'تغيير الشعار' : 'رفع الشعار'}</span>
               <input type="file" accept="image/*" onChange={handleLogoFileUpload} className="hidden" />
             </label>
 
@@ -435,27 +435,27 @@ export const PharmacyProfileView: React.FC = () => {
             <div className="pt-4 border-t border-slate-100 space-y-3">
               <h4 className="font-black text-slate-900 text-xs flex items-center gap-1.5">
                 <Receipt className="w-4 h-4 text-slate-600" />
-                تخصيص الفاتورة المطبوعة (Thermal Receipt)
+                الفاتورة المطبوعة
               </h4>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">نص الترويسة (أعلى الفاتورة)</label>
+                <label className="block text-[11px] font-bold text-slate-600 mb-1">أعلى الفاتورة</label>
                 <input
                   type="text"
                   value={pharmacyForm.receiptHeader}
                   onChange={(e) => setPharmacyForm({ ...pharmacyForm, receiptHeader: e.target.value })}
-                  placeholder="مثال: صيدلية اليرموك - د. علي"
+                  placeholder="مثال: صيدلية اليرموك"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold"
                 />
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">نص التذييل (أسفل الفاتورة)</label>
+                <label className="block text-[11px] font-bold text-slate-600 mb-1">أسفل الفاتورة</label>
                 <textarea
                   rows={2}
                   value={pharmacyForm.receiptFooter}
                   onChange={(e) => setPharmacyForm({ ...pharmacyForm, receiptFooter: e.target.value })}
-                  placeholder="مثال: نتمنى لكم الشفاء العاجل • الأدوية المباعة لا ترد ولا تستبدل"
+                  placeholder="مثال: الأدوية المباعة لا ترد ولا تستبدل"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs"
                 />
               </div>
@@ -475,7 +475,7 @@ export const PharmacyProfileView: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-500">
-              حفظ نسخة كاملة من بيانات الصيدلية (المخزون، الفواتير، الديون) داخل مجلد في حاسوبك يومياً.
+              حفظ نسخة من بيانات الصيدلية في جهازك
             </p>
 
             {backupMessage && (
@@ -493,7 +493,7 @@ export const PharmacyProfileView: React.FC = () => {
             {/* Folder Selection Box */}
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-700">مجلد الحفظ في الحاسوب:</span>
+                <span className="font-bold text-slate-700">مجلد الحفظ:</span>
                 {dirName ? (
                   <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded-md font-bold text-[11px]">
                     📁 {dirName}
@@ -509,15 +509,15 @@ export const PharmacyProfileView: React.FC = () => {
                 className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
               >
                 <FolderDown className="w-4 h-4" />
-                {dirName ? 'تغيير المجلد' : 'اختيار مجلد النسخ'}
+                {dirName ? 'تغيير المجلد' : 'اختيار المجلد'}
               </button>
             </div>
 
             {/* Daily Auto-Backup Toggle */}
             <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-2xl">
               <div>
-                <div className="text-xs font-black text-slate-800">النسخ التلقائي اليومي</div>
-                <div className="text-[10px] text-slate-400">حفظ تلقائي عند إغلاق الوردية</div>
+                <div className="text-xs font-black text-slate-800">النسخ التلقائي</div>
+                <div className="text-[10px] text-slate-400">عند إغلاق الوردية</div>
               </div>
               <input
                 type="checkbox"
@@ -570,7 +570,7 @@ export const PharmacyProfileView: React.FC = () => {
           <form onSubmit={handleSavePharmacyInfo} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-4">
             <h3 className="font-black text-slate-900 text-base flex items-center gap-2 pb-3 border-b border-slate-100">
               <Building2 className="w-5 h-5 text-indigo-600" />
-              بيانات وموقع الصيدلية
+              بيانات الصيدلية
             </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -586,7 +586,7 @@ export const PharmacyProfileView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">رقم هاتف الصيدلية</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">الهاتف</label>
                 <input
                   type="text"
                   value={pharmacyForm.phone}
@@ -643,11 +643,8 @@ export const PharmacyProfileView: React.FC = () => {
               <div className="flex items-center justify-between pb-2 border-b border-indigo-100/60">
                 <div className="flex items-center gap-2">
                   <Globe className="w-4 h-4 text-indigo-600" />
-                  <h4 className="text-xs font-black text-slate-900">إعدادات الخصوصية والبحث الشبكي للجمهور</h4>
+                  <h4 className="text-xs font-black text-slate-900">إعدادات البحث العام</h4>
                 </div>
-                <span className="text-[10px] px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded-full font-extrabold">
-                  تحكم كامل
-                </span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -673,8 +670,8 @@ export const PharmacyProfileView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <Eye className="w-4 h-4 text-slate-500" />
                     <div>
-                      <div className="text-xs font-black text-slate-800">إظهار أسعار الأدوية</div>
-                      <div className="text-[10px] text-slate-400">عرض أسعار البيع للجمهور بالبحث</div>
+                      <div className="text-xs font-black text-slate-800">إظهار الأسعار</div>
+                      <div className="text-[10px] text-slate-400">عرض أسعار البيع للجمهور</div>
                     </div>
                   </div>
                   <input
@@ -690,8 +687,8 @@ export const PharmacyProfileView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <PhoneCall className="w-4 h-4 text-slate-500" />
                     <div>
-                      <div className="text-xs font-black text-slate-800">إظهار رقم الهاتف</div>
-                      <div className="text-[10px] text-slate-400">زر الاتصال المباشر بالصيدلية</div>
+                      <div className="text-xs font-black text-slate-800">إظهار الهاتف</div>
+                      <div className="text-[10px] text-slate-400">زر الاتصال بالصيدلية</div>
                     </div>
                   </div>
                   <input
@@ -707,8 +704,8 @@ export const PharmacyProfileView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <MessageCircle className="w-4 h-4 text-emerald-600" />
                     <div>
-                      <div className="text-xs font-black text-slate-800">زر الواتساب المباشر</div>
-                      <div className="text-[10px] text-slate-400">محادثة فورية للاستفسار والحجز</div>
+                      <div className="text-xs font-black text-slate-800">زر واتساب</div>
+                      <div className="text-[10px] text-slate-400">محادثة فورية للاستفسار</div>
                     </div>
                   </div>
                   <input
@@ -724,8 +721,8 @@ export const PharmacyProfileView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <Moon className="w-4 h-4 text-amber-500" />
                     <div>
-                      <div className="text-xs font-black text-slate-800">صيدلية خافرة / تعمل 24 ساعة</div>
-                      <div className="text-[10px] text-slate-400">شارة خفارة مميزة في نتائج البحث الليلي للمرضى</div>
+                      <div className="text-xs font-black text-slate-800">صيدلية خافرة (24 ساعة)</div>
+                      <div className="text-[10px] text-slate-400">شارة خفارة في البحث الليلي للمرضى</div>
                     </div>
                   </div>
                   <input
@@ -745,11 +742,11 @@ export const PharmacyProfileView: React.FC = () => {
                   <Brain className="w-5 h-5 text-amber-300 animate-pulse" />
                   <div>
                     <h4 className="text-xs font-black text-white flex items-center gap-1.5">
-                      <span>الذكاء الاصطناعي لقراءة فواتير المذاخر (AI Smart OCR)</span>
+                      <span>الذكاء الاصطناعي لقراءة الفواتير</span>
                       <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                     </h4>
                     <p className="text-[10px] text-slate-300 mt-0.5">
-                      ميزة اختيارية لقراءة وتصوير فواتير المذاخر واستخراج الأدوية والصلاحية والوجبات تلقائياً
+                      قراءة وتصوير فواتير المذاخر تلقائياً بواسطة Gemini AI
                     </p>
                   </div>
                 </div>
@@ -757,11 +754,11 @@ export const PharmacyProfileView: React.FC = () => {
                 <div>
                   {pharmacyForm.geminiApiKey ? (
                     <span className="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full text-[10px] font-black">
-                      🟢 مفعل (Gemini AI Active)
+                      🟢 مفعل
                     </span>
                   ) : (
                     <span className="px-2.5 py-1 bg-slate-800 text-slate-400 border border-slate-700 rounded-full text-[10px] font-bold">
-                      ⚪ غير مفعل (اختياري)
+                      ⚪ غير مفعل
                     </span>
                   )}
                 </div>
@@ -770,7 +767,7 @@ export const PharmacyProfileView: React.FC = () => {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="block text-xs font-bold text-slate-200">
-                    رمز Google Gemini API Key الخاص بالصيدلية:
+                    مفتاح Gemini API:
                   </label>
                   <a
                     href="https://aistudio.google.com/app/apikey"
@@ -778,7 +775,7 @@ export const PharmacyProfileView: React.FC = () => {
                     rel="noreferrer"
                     className="text-[11px] text-amber-300 hover:text-amber-200 underline flex items-center gap-1 font-bold transition-colors"
                   >
-                    <span>احصل على مفتاحك مجاناً من Google AI Studio</span>
+                    <span>احصل على المفتاح مجاناً</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
@@ -788,7 +785,7 @@ export const PharmacyProfileView: React.FC = () => {
                     type={showApiKey ? 'text' : 'password'}
                     value={pharmacyForm.geminiApiKey}
                     onChange={(e) => setPharmacyForm({ ...pharmacyForm, geminiApiKey: e.target.value })}
-                    placeholder="مثال: AIzaSyD..."
+                    placeholder="AIzaSyD..."
                     className="w-full pl-10 pr-3 py-2.5 bg-slate-800/90 border border-slate-700 rounded-xl text-xs font-mono font-bold text-amber-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-hidden"
                   />
                   <button
@@ -800,10 +797,6 @@ export const PharmacyProfileView: React.FC = () => {
                     {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
-
-                <p className="text-[10px] text-slate-400 leading-relaxed">
-                  🔒 يتم حفظ المفتاح بأمان تام داخل قاعدة بيانات صيدليتك فقط، ويستخدم حصرياً لتحليل صور الفواتير التي تقوم برفعها.
-                </p>
               </div>
             </div>
 
@@ -813,7 +806,7 @@ export const PharmacyProfileView: React.FC = () => {
               className="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-xs cursor-pointer transition-all active:scale-95"
             >
               <Save className="w-4 h-4" />
-              {saving ? 'جاري الحفظ...' : 'حفظ تعديلات الصيدلية والذكاء الاصطناعي'}
+              {saving ? 'جاري الحفظ...' : 'حفظ التعديلات'}
             </button>
           </form>
 
@@ -821,7 +814,7 @@ export const PharmacyProfileView: React.FC = () => {
           <form onSubmit={handleChangeOwnerPassword} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-4">
             <h3 className="font-black text-slate-900 text-base flex items-center gap-2 pb-3 border-b border-slate-100">
               <Key className="w-5 h-5 text-indigo-600" />
-              أمان حساب صاحب الصيدلية ({profileData?.owner?.name})
+              أمان الحساب ({profileData?.owner?.name})
             </h3>
 
             {passwordMessage && (
@@ -866,7 +859,7 @@ export const PharmacyProfileView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">تأكيد كلمة المرور الجديدة *</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">تأكيد كلمة المرور *</label>
                 <input
                   type="password"
                   required
@@ -882,7 +875,7 @@ export const PharmacyProfileView: React.FC = () => {
               type="submit"
               className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer transition-all"
             >
-              تحديث كلمة المرور الشخصية
+              تحديث كلمة المرور
             </button>
           </form>
 
@@ -891,14 +884,14 @@ export const PharmacyProfileView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-black text-slate-900 text-base flex items-center gap-2">
                 <Users className="w-5 h-5 text-indigo-600" />
-                كادر وموظفو الكاشير ({profileData?.cashiers?.length || 0})
+                الكاشير ({profileData?.cashiers?.length || 0})
               </h3>
               <button
                 onClick={() => setShowAddCashierModal(true)}
                 className="flex items-center gap-1 px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold cursor-pointer transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
-                إضافة كاشير جديد
+                كاشير جديد +
               </button>
             </div>
 
@@ -906,9 +899,9 @@ export const PharmacyProfileView: React.FC = () => {
               <table className="w-full text-right text-xs">
                 <thead className="bg-slate-100/75 text-slate-700 font-bold border-b border-slate-200">
                   <tr>
-                    <th className="p-3">اسم الكاشير</th>
-                    <th className="p-3">اسم المستخدم (Username)</th>
-                    <th className="p-3">تاريخ الإنشاء</th>
+                    <th className="p-3">الكاشير</th>
+                    <th className="p-3">اسم المستخدم</th>
+                    <th className="p-3">التاريخ</th>
                     <th className="p-3 text-center">إجراءات</th>
                   </tr>
                 </thead>

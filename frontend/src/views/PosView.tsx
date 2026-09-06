@@ -277,6 +277,31 @@ export const PosView: React.FC = () => {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  // Check active server / cloud DB connectivity
+  const checkConnectivity = async (): Promise<boolean> => {
+    if (!navigator.onLine) {
+      setIsOnline(false);
+      return false;
+    }
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch('/api/health', { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        const connected = data.database === 'connected';
+        setIsOnline(connected);
+        return connected;
+      }
+      setIsOnline(false);
+      return false;
+    } catch {
+      setIsOnline(false);
+      return false;
+    }
+  };
+
   // Refresh pending offline sales counter
   const refreshPendingCount = async () => {
     try {
@@ -289,7 +314,7 @@ export const PosView: React.FC = () => {
 
   // Sync offline sales to cloud
   const syncPendingSales = async () => {
-    if (isSyncing) return;
+    if (isSyncing || !navigator.onLine) return;
     try {
       const pending = await getPendingSales();
       if (pending.length === 0) return;
@@ -324,7 +349,8 @@ export const PosView: React.FC = () => {
         text: `تمت مزامنة (${res.syncedCount}) فواتير تم بيعها أثناء انقطاع الإنترنت بنجاح مع السحابة! ☁️✅`,
       });
     } catch (err: any) {
-      console.error('Sync failed:', err);
+      console.warn('Sync postponed, cloud database not yet reachable:', err);
+      setIsOnline(false);
     } finally {
       setIsSyncing(false);
     }
@@ -335,14 +361,16 @@ export const PosView: React.FC = () => {
     searchInputRef.current?.focus();
 
     const warmCache = async () => {
-      if (navigator.onLine) {
+      const online = await checkConnectivity();
+      if (online) {
         try {
           const fullInv = await apiRequest<SearchMedicine[]>('/inventory');
           if (Array.isArray(fullInv) && fullInv.length > 0) {
             await cacheInventoryLocally(fullInv);
           }
         } catch (err) {
-          console.warn('Could not warm inventory cache from server', err);
+          console.warn('Could not warm inventory cache from server, operating locally', err);
+          setIsOnline(false);
         }
       }
       refreshPendingCount();
@@ -350,11 +378,13 @@ export const PosView: React.FC = () => {
     warmCache();
   }, []);
 
-  // Online / Offline Listeners & Auto-Sync
+  // Online / Offline Listeners & Periodic Background Health Heartbeat
   useEffect(() => {
-    const handleOnline = () => {
-      setIsOnline(true);
-      syncPendingSales();
+    const handleOnline = async () => {
+      const online = await checkConnectivity();
+      if (online) {
+        syncPendingSales();
+      }
     };
     const handleOffline = () => {
       setIsOnline(false);
@@ -363,13 +393,29 @@ export const PosView: React.FC = () => {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
+    // Heartbeat: Check connection every 15 seconds to gracefully auto-recover when internet restores
+    const heartbeat = setInterval(async () => {
+      const wasOffline = !isOnline;
+      const nowOnline = await checkConnectivity();
+      if (wasOffline && nowOnline) {
+        syncPendingSales();
+        try {
+          const fullInv = await apiRequest<SearchMedicine[]>('/inventory');
+          if (Array.isArray(fullInv) && fullInv.length > 0) {
+            await cacheInventoryLocally(fullInv);
+          }
+        } catch {}
+      }
+    }, 15000);
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      clearInterval(heartbeat);
     };
-  }, []);
+  }, [isOnline]);
 
-  // Search medicines (Online with seamless Offline fallback)
+  // Search medicines (Smart Instant Failover: Instant local search if offline, server search if online)
   useEffect(() => {
     if (searchTerm.trim().length === 0) {
       setSearchResults([]);
@@ -377,55 +423,36 @@ export const PosView: React.FC = () => {
     }
 
     const timer = setTimeout(async () => {
-      if (navigator.onLine) {
+      // 1. If currently offline, search directly in local IndexedDB (0ms latency, zero 500 errors in console)
+      if (!isOnline || !navigator.onLine) {
         try {
-          const data = await apiRequest<SearchMedicine[]>(`/inventory?search=${encodeURIComponent(searchTerm)}`);
-          if (Array.isArray(data) && data.length > 0) {
-            setSearchResults(data);
-            return;
-          }
-
-          // If not in local pharmacy inventory, search the 28,500 Master Catalog!
-          const catData = await apiRequest<any[]>(`/medicines/search?q=${encodeURIComponent(searchTerm)}`);
-          if (Array.isArray(catData) && catData.length > 0) {
-            const mapped: SearchMedicine[] = catData.map((c) => ({
-              id: c.id,
-              medicineId: c.id,
-              tradeName: c.tradeName,
-              scientificName: c.scientificName,
-              dosageForm: c.dosageForm,
-              strength: c.strength,
-              barcode: c.barcode,
-              unitsPerPack: c.defaultUnitsPerPack || 1,
-              sellingPricePack: 0,
-              sellingPriceUnit: 0,
-              availablePacks: 0,
-              availableStrips: 0,
-              totalUnitsRemaining: 0,
-              activeBatches: [],
-            }));
-            setSearchResults(mapped);
-            return;
-          }
-
-          setSearchResults([]);
-          return;
+          const localData = await searchLocalInventory(searchTerm);
+          setSearchResults(localData);
         } catch (err) {
-          console.warn('Online search failed, falling back to local IndexedDB', err);
+          console.error('Offline search error:', err);
         }
+        return;
       }
 
-      // Offline search fallback
+      // 2. If online, attempt server search
       try {
-        const localData = await searchLocalInventory(searchTerm);
-        setSearchResults(localData);
+        const data = await apiRequest<SearchMedicine[]>(`/inventory?search=${encodeURIComponent(searchTerm)}`);
+        setSearchResults(Array.isArray(data) ? data : []);
+        return;
       } catch (err) {
-        console.error('Offline search error:', err);
+        console.warn('Online search failed, immediately switching to offline mode', err);
+        setIsOnline(false); // Immediate circuit breaker!
+        try {
+          const localData = await searchLocalInventory(searchTerm);
+          setSearchResults(localData);
+        } catch (localErr) {
+          console.error('Offline fallback search error:', localErr);
+        }
       }
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [searchTerm]);
+  }, [searchTerm, isOnline]);
 
   const addToCart = (med: SearchMedicine, unitType: 'PACK' | 'STRIP', specificBatch?: ActiveBatchInfo) => {
     let packPrice = Number(med.sellingPricePack) || 0;
@@ -577,8 +604,8 @@ export const PosView: React.FC = () => {
       })),
     };
 
-    // Try online checkout first if online
-    if (navigator.onLine) {
+    // Try online checkout first ONLY if truly online
+    if (isOnline && navigator.onLine) {
       try {
         const result = await apiRequest<any>('/pos/checkout', {
           method: 'POST',
@@ -594,7 +621,8 @@ export const PosView: React.FC = () => {
         searchInputRef.current?.focus();
         return;
       } catch (err: any) {
-        console.warn('Server checkout failed or connection lost, falling back to Offline Mode', err);
+        console.warn('Server checkout failed or connection lost, switching to Offline Mode', err);
+        setIsOnline(false);
       }
     }
 
@@ -710,31 +738,33 @@ export const PosView: React.FC = () => {
     <>
       <div className="flex flex-col min-h-0 lg:h-[calc(100vh-80px)] gap-3 sm:gap-4 print:hidden w-full max-w-full overflow-x-hidden">
       {/* Top Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-white p-2.5 sm:p-3.5 rounded-xl border border-slate-200 shadow-xs w-full max-w-full">
-        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          <h1 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-1.5 sm:gap-2">
-            <ShoppingCart className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-600" />
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-xs w-full max-w-full">
+        <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
+          <h1 className="text-lg sm:text-xl font-black text-slate-900 flex items-center gap-2">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+              <ShoppingCart className="w-5 h-5" />
+            </div>
             <span>الكاشير</span>
           </h1>
 
           {/* Offline / Online Connectivity Indicator */}
           {isOnline ? (
-            <div className="flex items-center gap-1 px-2 py-0.5 sm:px-2.5 sm:py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] sm:text-xs font-bold shadow-2xs">
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-xs sm:text-sm font-black shadow-2xs">
               {isLiveSyncConnected ? (
                 <>
-                  <Zap className="w-3 h-3 text-amber-500 fill-amber-500" />
-                  <span className="hidden sm:inline">مزامنة لحظية (Live)</span>
+                  <Zap className="w-4 h-4 text-amber-500 fill-amber-500" />
+                  <span>مزامنة لحظية (Live)</span>
                 </>
               ) : (
                 <>
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span className="hidden sm:inline">متصل بالسحابة</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>متصل بالسحابة</span>
                 </>
               )}
             </div>
           ) : (
-            <div className="flex items-center gap-1 px-2 py-0.5 sm:px-2.5 sm:py-1 bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-[10px] sm:text-xs font-black shadow-2xs">
-              <WifiOff className="w-3 h-3 text-amber-700" />
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs sm:text-sm font-black shadow-2xs">
+              <WifiOff className="w-4 h-4 text-amber-700" />
               <span>محلي (أوفلاين)</span>
             </div>
           )}
@@ -744,38 +774,38 @@ export const PosView: React.FC = () => {
             <button
               onClick={syncPendingSales}
               disabled={!isOnline || isSyncing}
-              className="flex items-center gap-1 px-2 py-0.5 sm:px-3 sm:py-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-lg text-[10px] sm:text-xs font-bold transition-all shadow-xs cursor-pointer active:scale-95"
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-xl text-xs sm:text-sm font-black transition-all shadow-xs cursor-pointer active:scale-95"
               title="مزامنة الفواتير غير المرفوعة مع السيرفر"
             >
-              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
               <span>مزامنة ({pendingSalesCount})</span>
             </button>
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
           <button
             onClick={toggleFullscreen}
-            className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-lg border border-indigo-200 transition-colors cursor-pointer"
+            className="hidden sm:flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-black text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-xl border border-indigo-200 transition-all cursor-pointer active:scale-95"
             title={isFullscreen ? 'الخروج من ملء الشاشة' : 'وضع ملء الشاشة (Kiosk Mode)'}
           >
-            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             <span className="hidden md:inline">{isFullscreen ? 'تصغير' : 'ملء الشاشة'}</span>
           </button>
 
           <button
             onClick={() => setShowReturnModal(true)}
-            className="flex items-center gap-1 px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg border border-amber-200 transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-black text-amber-900 bg-amber-50 hover:bg-amber-100 rounded-xl border border-amber-200 transition-all cursor-pointer active:scale-95"
           >
-            <RefreshCw className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+            <RefreshCw className="w-4 h-4" />
             <span>إرجاع</span>
           </button>
 
           <button
             onClick={fetchShiftSummary}
-            className="flex items-center gap-1 px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-300 transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-black text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-300 transition-all cursor-pointer active:scale-95"
           >
-            <DollarSign className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+            <DollarSign className="w-4 h-4" />
             <span>اليومية</span>
           </button>
 
@@ -784,10 +814,10 @@ export const PosView: React.FC = () => {
               await fetchShiftSummary();
               setShowShiftCloseModal(true);
             }}
-            className="flex items-center gap-1 px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-black text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-xl border border-rose-200 transition-all cursor-pointer active:scale-95 shadow-2xs"
             title="إغلاق وردية الكاشير ومطابقة نقد الدرج"
           >
-            <Lock className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+            <Lock className="w-4 h-4" />
             <span>إغلاق الوردية</span>
           </button>
         </div>
@@ -812,17 +842,17 @@ export const PosView: React.FC = () => {
       {/* Main Grid: Search & Catalog on Right, Cart on Left */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 min-h-0">
         {/* Right Section: Fast Search & Results (7 Cols) */}
-        <div className="lg:col-span-7 flex flex-col bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-          <div className="p-3.5 border-b border-slate-200 bg-slate-50/50 flex items-center gap-2">
+        <div className="lg:col-span-7 flex flex-col bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50/70 flex items-center gap-2.5">
             <div className="relative flex-1">
-              <Search className="w-4 h-4 absolute right-3.5 top-3.5 text-slate-400" />
+              <Search className="w-5 h-5 absolute right-4 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 ref={searchInputRef}
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="بحث سريع أو باركود..."
-                className="w-full pr-10 pl-3 py-2.5 bg-white border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-xs sm:text-sm font-bold shadow-xs"
+                placeholder="ابحث بالاسم أو امسح الباركود..."
+                className="w-full pr-12 pl-4 py-3 sm:py-3.5 bg-white border-2 border-slate-200 rounded-2xl text-slate-900 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm sm:text-base font-black shadow-xs transition-all"
               />
             </div>
 
@@ -833,10 +863,10 @@ export const PosView: React.FC = () => {
                 setSmartSearchAutoVoice(true);
                 setShowSmartSearch(true);
               }}
-              className="p-2.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center gap-1.5 text-xs font-black shrink-0"
+              className="h-12 sm:h-13 px-4 sm:px-5 bg-rose-50 hover:bg-rose-100 text-rose-700 border-2 border-rose-200 rounded-2xl transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center gap-2 text-xs sm:text-sm font-black shrink-0"
               title="البحث الصوتي الذكي (Voice AI)"
             >
-              <Mic className="w-4 h-4 text-rose-600 animate-pulse" />
+              <Mic className="w-4 h-4 sm:w-5 sm:h-5 text-rose-600 animate-pulse" />
               <span className="hidden sm:inline">صوتي 🎙️</span>
             </button>
 
@@ -847,47 +877,59 @@ export const PosView: React.FC = () => {
                 setSmartSearchAutoVoice(false);
                 setShowSmartSearch(true);
               }}
-              className="p-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center gap-1.5 text-xs font-black shrink-0"
+              className="h-12 sm:h-13 px-4 sm:px-5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-2 border-indigo-200 rounded-2xl transition-all cursor-pointer shadow-2xs active:scale-95 flex items-center gap-2 text-xs sm:text-sm font-black shrink-0"
               title="البحث باللغة الطبيعية والبدائل (AI Co-Pilot)"
             >
-              <Sparkles className="w-4 h-4 text-indigo-600" />
+              <Sparkles className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-600" />
               <span className="hidden md:inline">مساعد ذكي 🧠</span>
             </button>
           </div>
 
           {/* Results List */}
-          <div className="flex-1 overflow-y-auto p-3 divide-y divide-slate-100">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-4 divide-y divide-slate-100">
             {searchResults.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-slate-400 py-10">
-                <Package className="w-10 h-10 mb-2 text-slate-300 stroke-[1.5]" />
-                <p className="text-sm font-bold">امسح الباركود أو ابحث</p>
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 py-16">
+                <div className="w-16 h-16 rounded-3xl bg-slate-100 flex items-center justify-center mb-3">
+                  <Package className="w-8 h-8 text-slate-400 stroke-[1.5]" />
+                </div>
+                {searchTerm.trim().length > 0 ? (
+                  <>
+                    <p className="text-base font-black text-slate-700">لا يوجد دواء مطابق في مخزن الصيدلية</p>
+                    <p className="text-xs text-slate-400 mt-1">تأكد من كتابة الاسم أو امسح الباركود، أو ابحث في المساعد الذكي</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-base font-black text-slate-600">امسح الباركود أو ابحث عن العلاج</p>
+                    <p className="text-xs text-slate-400 mt-1">تظهر أدوية المخزن وأسعار العلب والأشرطة فوراً</p>
+                  </>
+                )}
               </div>
             ) : (
               searchResults.map((med) => {
                 const hasMultipleBatches = med.activeBatches && med.activeBatches.length > 1;
 
                 return (
-                  <div key={med.id} className="py-2.5 px-2 hover:bg-slate-50 rounded-xl transition-colors border-b border-slate-100 last:border-0">
-                    <div className="flex items-center justify-between gap-2">
+                  <div key={med.id} className="p-3 sm:p-4 hover:bg-slate-50/90 rounded-2xl transition-all border-b border-slate-100 last:border-0">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-bold text-slate-900 text-sm">{med.tradeName}</span>
+                          <span className="font-black text-slate-900 text-base sm:text-lg">{med.tradeName}</span>
                           {med.shelfLocation && (
-                            <span className="px-2 py-0.5 bg-amber-50 text-amber-900 border border-amber-300 rounded-md text-[10px] font-black font-mono shadow-2xs">
+                            <span className="px-2.5 py-1 bg-amber-50 text-amber-900 border border-amber-300 rounded-xl text-xs font-black font-mono shadow-2xs">
                               📍 {med.shelfLocation}
                             </span>
                           )}
                           {med.customName && (
-                            <span className="px-2 py-0.5 bg-amber-50 text-amber-900 border border-amber-200 rounded-md text-xs font-black">
+                            <span className="px-2.5 py-1 bg-amber-50 text-amber-900 border border-amber-200 rounded-xl text-xs font-black">
                               🏷️ {med.customName}
                             </span>
                           )}
                           {med.totalUnitsRemaining <= 0 ? (
-                            <span className="text-xs px-2 py-0.5 bg-rose-50 text-rose-600 border border-rose-200 rounded-full font-bold">
+                            <span className="text-xs px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl font-black">
                               نافد
                             </span>
                           ) : (
-                            <span className="text-xs px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full font-bold">
+                            <span className="text-xs px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl font-black">
                               متوفر: {med.availablePacks} علبة و {med.availableStrips} شريط
                             </span>
                           )}
@@ -898,38 +940,44 @@ export const PosView: React.FC = () => {
                               e.stopPropagation();
                               handleCheckCrossStock(med);
                             }}
-                            className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-md text-[10px] font-black flex items-center gap-1 cursor-pointer transition-colors shadow-2xs active:scale-95"
+                            className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-black flex items-center gap-1 cursor-pointer transition-colors shadow-2xs active:scale-95"
                             title="فحص توفر هذا الدواء في باقي فروع السلسلة"
                           >
-                            <Building2 className="w-3 h-3 text-indigo-600" />
+                            <Building2 className="w-3.5 h-3.5 text-indigo-600" />
                             <span>فحص بالفروع</span>
                           </button>
                         </div>
-                        <div className="text-xs text-slate-500 mt-0.5 truncate">
+                        <div className="text-xs sm:text-sm text-slate-500 font-medium mt-1 truncate">
                           {med.scientificName}
-                          {med.strength && <span className="mx-1 text-slate-700 font-medium">- {med.strength}</span>}
-                          {med.dosageForm && <span className="text-slate-400">({med.dosageForm})</span>}
+                          {med.strength && <span className="mx-1.5 text-slate-700 font-bold">• {med.strength}</span>}
+                          {med.dosageForm && <span className="text-slate-500">({med.dosageForm})</span>}
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0">
                         {/* Add Pack Button */}
                         <button
                           onClick={() => addToCart(med, 'PACK')}
-                          className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs active:scale-95 transition-all cursor-pointer"
+                          className="flex items-center gap-2 px-4 sm:px-5 py-2.5 sm:py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-black shadow-md shadow-emerald-700/20 active:scale-95 transition-all cursor-pointer"
                         >
-                          <Plus className="w-3.5 h-3.5" />
-                          علبة ({Number(med.sellingPricePack).toLocaleString()} د.ع)
+                          <Plus className="w-4 h-4 stroke-[3]" />
+                          <span>علبة</span>
+                          <span className="font-mono font-bold bg-emerald-700/50 px-2 py-0.5 rounded-lg text-emerald-100">
+                            {Number(med.sellingPricePack).toLocaleString()} د.ع
+                          </span>
                         </button>
 
                         {/* Add Strip Button (Only if units per pack > 1) */}
                         {med.unitsPerPack > 1 && (
                           <button
                             onClick={() => addToCart(med, 'STRIP')}
-                            className="flex items-center gap-1 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold shadow-xs active:scale-95 transition-all cursor-pointer"
+                            className="flex items-center gap-2 px-4 sm:px-5 py-2.5 sm:py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-black shadow-md shadow-blue-700/20 active:scale-95 transition-all cursor-pointer"
                           >
-                            <Layers className="w-3.5 h-3.5" />
-                            شريط ({Number(med.sellingPriceUnit).toLocaleString()} د.ع)
+                            <Layers className="w-4 h-4 stroke-[2.5]" />
+                            <span>شريط</span>
+                            <span className="font-mono font-bold bg-blue-700/50 px-2 py-0.5 rounded-lg text-blue-100">
+                              {Number(med.sellingPriceUnit).toLocaleString()} د.ع
+                            </span>
                           </button>
                         )}
                       </div>
@@ -937,19 +985,19 @@ export const PosView: React.FC = () => {
 
                     {/* Batch Selector if multiple batches exist with differing prices */}
                     {hasMultipleBatches && (
-                      <div className="mt-2 pt-2 border-t border-dashed border-slate-200 flex items-center gap-1.5 flex-wrap">
-                        <span className="text-[10px] font-bold text-slate-400">اختر وجبة محددة:</span>
+                      <div className="mt-2.5 pt-2.5 border-t border-dashed border-slate-200 flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-black text-slate-500">اختر تشغيلة محددة:</span>
                         {med.activeBatches?.map((batch) => (
                           <button
                             key={batch.id}
                             type="button"
                             onClick={() => addToCart(med, 'PACK', batch)}
-                            className="px-2 py-1 bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-900 border border-slate-200 hover:border-emerald-300 rounded-lg text-[11px] font-bold transition-all cursor-pointer shadow-2xs flex items-center gap-1.5 active:scale-95"
+                            className="px-3 py-1.5 bg-white hover:bg-emerald-50 text-slate-800 hover:text-emerald-950 border border-slate-200 hover:border-emerald-300 rounded-xl text-xs font-black transition-all cursor-pointer shadow-2xs flex items-center gap-2 active:scale-95"
                             title="إضافة هذه الوجبة المحددة مباشرة إلى السلة"
                           >
-                            <span className="font-mono text-slate-800">تشغيلة: {batch.batchNumber || '—'}</span>
-                            <span className="font-mono font-black text-emerald-700">{Number(batch.sellingPricePack).toLocaleString()} د.ع</span>
-                            <span className="text-[9px] text-slate-400 bg-slate-100 px-1 rounded">{batch.availablePacks} علب</span>
+                            <span className="font-mono">تشغيلة: {batch.batchNumber || '—'}</span>
+                            <span className="font-mono text-emerald-700">{Number(batch.sellingPricePack).toLocaleString()} د.ع</span>
+                            <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-md">{batch.availablePacks} علب</span>
                           </button>
                         ))}
                       </div>
@@ -962,93 +1010,102 @@ export const PosView: React.FC = () => {
         </div>
 
         {/* Left Section: Active Invoice / Cart (5 Cols) */}
-        <div className="lg:col-span-5 flex flex-col bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="lg:col-span-5 flex flex-col bg-white rounded-2xl border-2 border-slate-200 shadow-md overflow-hidden">
           {/* Cart Header */}
-          <div className="p-3.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-            <h2 className="font-black text-slate-800 flex items-center gap-2 text-sm">
-              <ShoppingCart className="w-4 h-4 text-slate-600" />
-              السلة
+          <div className="p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+            <h2 className="font-black text-slate-900 flex items-center gap-2.5 text-base sm:text-lg">
+              <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                <ShoppingCart className="w-5 h-5" />
+              </div>
+              <span>السلة</span>
             </h2>
-            <span className="text-xs font-bold px-2.5 py-0.5 bg-slate-200 text-slate-700 rounded-full">
-              {cart.length}
+            <span className="text-sm font-black px-3.5 py-1 bg-slate-200 text-slate-800 rounded-full font-mono">
+              {cart.length} مواد
             </span>
           </div>
 
           {/* Cart Items Table */}
-          <div className="flex-1 overflow-y-auto p-3 divide-y divide-slate-100 min-h-0">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-4 divide-y divide-slate-100 min-h-0 space-y-1">
             {cart.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-slate-400 py-10">
-                <ShoppingCart className="w-9 h-9 mb-2 text-slate-300 stroke-[1.5]" />
-                <p className="text-xs font-bold">السلة فارغة</p>
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 py-16">
+                <div className="w-16 h-16 rounded-3xl bg-slate-100 flex items-center justify-center mb-3">
+                  <ShoppingCart className="w-8 h-8 text-slate-400 stroke-[1.5]" />
+                </div>
+                <p className="text-base font-black text-slate-600">السلة فارغة</p>
+                <p className="text-xs text-slate-400 mt-1">اختر أدوية من القائمة للبدء بالبيع</p>
               </div>
             ) : (
               cart.map((item, idx) => (
-                <div key={`${item.inventoryItemId}-${item.unitType}-${item.inventoryBatchId || ''}`} className="py-2 flex items-center justify-between gap-2">
+                <div key={`${item.inventoryItemId}-${item.unitType}-${item.inventoryBatchId || ''}`} className="py-2.5 sm:py-3 flex items-center justify-between gap-2.5">
                   <div className="flex-1 min-w-0">
-                    <div className="font-bold text-slate-900 text-xs truncate flex items-center gap-1 flex-wrap">
+                    <div className="font-black text-slate-900 text-sm sm:text-base truncate flex items-center gap-1.5 flex-wrap">
                       <span>{item.tradeName}</span>
                       {item.shelfLocation && (
-                        <span className="text-amber-900 font-bold text-[9px] bg-amber-50 px-1 py-0.2 rounded border border-amber-200 font-mono">
+                        <span className="text-amber-900 font-black text-xs bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200 font-mono">
                           📍 {item.shelfLocation}
                         </span>
                       )}
                       {item.batchNumber && (
-                        <span className="text-indigo-800 font-bold text-[9px] bg-indigo-50 px-1 py-0.2 rounded border border-indigo-200 font-mono">
+                        <span className="text-indigo-900 font-black text-xs bg-indigo-50 px-2 py-0.5 rounded-lg border border-indigo-200 font-mono">
                           تشغيلة: {item.batchNumber}
                         </span>
                       )}
                       {item.customName && (
-                        <span className="text-amber-800 font-bold text-[10px] bg-amber-50 px-1 rounded">
+                        <span className="text-amber-800 font-black text-xs bg-amber-50 px-1.5 py-0.5 rounded-md">
                           ({item.customName})
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5 flex-wrap">
-                      <span className={`px-1 py-0.2 rounded text-[9px] font-bold ${item.unitType === 'PACK' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}`}>
+                    <div className="flex items-center gap-2 text-xs text-slate-600 mt-1 flex-wrap">
+                      <span className={`px-2.5 py-0.5 rounded-lg text-xs font-black shadow-2xs ${item.unitType === 'PACK' ? 'bg-emerald-100 text-emerald-900 border border-emerald-300' : 'bg-blue-100 text-blue-900 border border-blue-300'}`}>
                         {item.unitType === 'PACK' ? 'علبة' : 'شريط'}
                       </span>
                       {item.breakdown && item.breakdown.length > 1 ? (
                         <div className="flex items-center gap-1 flex-wrap">
                           {item.breakdown.map((b, bi) => (
-                            <span key={bi} className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200 text-[10px] font-mono">
+                            <span key={bi} className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded-lg border border-slate-300 text-xs font-mono font-bold">
                               {b.qty} × {Number(b.unitPrice).toLocaleString()} د.ع
                             </span>
                           ))}
                         </div>
                       ) : (
-                        <span>{Math.round(item.unitPrice).toLocaleString()} د.ع</span>
+                        <span className="font-mono font-bold text-slate-700">{Math.round(item.unitPrice).toLocaleString()} د.ع</span>
                       )}
                     </div>
                   </div>
 
                   {/* Quantity Controls */}
-                  <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
+                  <div className="flex items-center gap-1.5 bg-slate-100 rounded-2xl p-1 border border-slate-200 shadow-2xs shrink-0">
                     <button
+                      type="button"
                       onClick={() => updateQuantity(idx, -1)}
-                      className="w-5 h-5 rounded bg-white hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-2xs cursor-pointer"
+                      className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white hover:bg-rose-50 hover:text-rose-700 text-slate-800 flex items-center justify-center shadow-xs cursor-pointer active:scale-90 transition-all font-black"
                     >
-                      <Minus className="w-3 h-3" />
+                      <Minus className="w-4 h-4 stroke-[3]" />
                     </button>
-                    <span className="w-5 text-center font-bold text-xs text-slate-900">{item.quantity}</span>
+                    <span className="w-7 sm:w-8 text-center font-black text-base sm:text-lg text-slate-900 font-mono">{item.quantity}</span>
                     <button
+                      type="button"
                       onClick={() => updateQuantity(idx, 1)}
-                      className="w-5 h-5 rounded bg-white hover:bg-slate-200 text-slate-700 flex items-center justify-center shadow-2xs cursor-pointer"
+                      className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-white hover:bg-emerald-50 hover:text-emerald-700 text-slate-800 flex items-center justify-center shadow-xs cursor-pointer active:scale-90 transition-all font-black"
                     >
-                      <Plus className="w-3 h-3" />
+                      <Plus className="w-4 h-4 stroke-[3]" />
                     </button>
                   </div>
 
                   {/* Line Total */}
-                  <div className="w-16 text-left font-bold text-xs text-slate-900">
+                  <div className="w-20 sm:w-24 text-left font-black text-sm sm:text-base text-slate-900 font-mono shrink-0">
                     {item.totalPrice.toLocaleString()} د.ع
                   </div>
 
                   {/* Remove Button */}
                   <button
+                    type="button"
                     onClick={() => removeItem(idx)}
-                    className="text-slate-400 hover:text-rose-600 p-1 rounded transition-colors cursor-pointer"
+                    className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer shrink-0"
+                    title="حذف من السلة"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-4 h-4 sm:w-5 sm:h-5" />
                   </button>
                 </div>
               ))
@@ -1056,16 +1113,16 @@ export const PosView: React.FC = () => {
           </div>
 
           {/* Cart Footer & Checkout */}
-          <div className="p-3.5 border-t border-slate-200 bg-slate-50/70 space-y-2.5">
+          <div className="p-3.5 sm:p-4 border-t-2 border-slate-200 bg-slate-50/90 space-y-3 shrink-0">
             {/* Subtotal */}
-            <div className="flex justify-between text-xs text-slate-600">
-              <span>المجموع:</span>
-              <span className="font-bold text-slate-900">{subtotal.toLocaleString()} د.ع</span>
+            <div className="flex justify-between items-center text-sm sm:text-base font-black text-slate-700">
+              <span>المجموع قبل الخصم:</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-900">{subtotal.toLocaleString()} د.ع</span>
             </div>
 
             {/* Discount */}
-            <div className="flex items-center justify-between text-xs gap-2">
-              <span className="text-slate-600">الخصم:</span>
+            <div className="flex items-center justify-between gap-3 bg-white p-2.5 rounded-xl border border-slate-200">
+              <span className="text-sm font-black text-slate-700">الخصم:</span>
               <div className="flex items-center gap-2">
                 <div className="relative">
                   <input
@@ -1085,9 +1142,9 @@ export const PosView: React.FC = () => {
                       }
                     }}
                     placeholder="%"
-                    className="w-16 px-2 py-1 pr-6 bg-white border border-slate-300 rounded text-left text-xs font-bold text-rose-600 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                    className="w-20 h-10 px-3 pr-7 bg-white border-2 border-slate-300 rounded-xl text-left text-sm font-black text-rose-600 focus:outline-hidden focus:border-emerald-500 font-mono"
                   />
-                  <span className="absolute right-2 top-1 text-slate-400 font-bold">%</span>
+                  <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 font-black text-xs">%</span>
                 </div>
                 <input
                   type="number"
@@ -1098,30 +1155,31 @@ export const PosView: React.FC = () => {
                     setDiscountAmount(Number(e.target.value));
                     setDiscountPercent('');
                   }}
-                  placeholder="مبلغ"
-                  className="w-20 px-2 py-1 bg-white border border-slate-300 rounded text-left text-xs font-bold text-rose-600 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                  placeholder="مبلغ الخصم"
+                  className="w-28 h-10 px-3 bg-white border-2 border-slate-300 rounded-xl text-left text-sm font-black text-rose-600 focus:outline-hidden focus:border-emerald-500 font-mono"
                 />
               </div>
             </div>
 
             {/* Total */}
-            <div className="flex justify-between items-center pt-1.5 border-t border-slate-200 text-sm font-black text-slate-900">
-              <span>الإجمالي:</span>
-              <span className="text-xl text-emerald-700 font-extrabold">{total.toLocaleString()} د.ع</span>
+            <div className="flex justify-between items-center py-2.5 px-3.5 bg-emerald-50 rounded-xl border-2 border-emerald-200 text-slate-900">
+              <span className="text-base sm:text-lg font-black text-emerald-950">المبلغ الإجمالي:</span>
+              <span className="text-2xl sm:text-3xl font-black font-mono text-emerald-700">{total.toLocaleString()} د.ع</span>
             </div>
 
             {/* Checkout Button */}
             <button
+              type="button"
               onClick={handleCheckout}
               disabled={cart.length === 0 || loading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-xl font-black text-sm shadow-xs flex items-center justify-center gap-1.5 active:scale-98 transition-all cursor-pointer"
+              className="w-full h-14 sm:h-16 bg-emerald-600 hover:bg-emerald-700 active:scale-98 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-2xl font-black text-lg sm:text-xl shadow-lg shadow-emerald-700/25 flex items-center justify-center gap-3 transition-all cursor-pointer"
             >
               {loading ? (
-                <RefreshCw className="w-4 h-4 animate-spin" />
+                <RefreshCw className="w-6 h-6 animate-spin" />
               ) : (
                 <>
-                  <CheckCircle2 className="w-4 h-4" />
-                  إتمام البيع ({total.toLocaleString()} د.ع)
+                  <CheckCircle2 className="w-6 h-6 stroke-[2.5]" />
+                  <span>إتمام البيع ({total.toLocaleString()} د.ع)</span>
                 </>
               )}
             </button>
@@ -1137,7 +1195,7 @@ export const PosView: React.FC = () => {
               <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto mb-3">
                 <CheckCircle2 className="w-7 h-7" />
               </div>
-              <h3 className="text-xl font-black text-slate-900">تمت عملية البيع بنجاح</h3>
+              <h3 className="text-xl font-black text-slate-900">تم البيع بنجاح</h3>
               <p className="text-xs text-slate-500 mt-1">رقم الفاتورة: {completedSale.invoiceNumber}</p>
             </div>
 
@@ -1151,14 +1209,14 @@ export const PosView: React.FC = () => {
                 <span>{completedSale.cashierName || 'الكاشير'}</span>
               </div>
               <div className="flex justify-between font-bold text-slate-900 pt-1 border-t border-slate-200">
-                <span>المبلغ المدفوع:</span>
+                <span>الواصل:</span>
                 <span className="text-emerald-700 font-mono text-sm">{Number(completedSale.totalAmount).toLocaleString()} د.ع</span>
               </div>
             </div>
 
             {completedSale.items && completedSale.items.length > 0 && (
               <div className="mt-3 divide-y divide-slate-100 border-t border-b border-slate-200 py-1 max-h-48 overflow-y-auto">
-                <div className="text-[10px] font-bold text-slate-400 mb-1">تفاصيل بنود الفاتورة والتشغيلات المصروفة:</div>
+                <div className="text-[10px] font-bold text-slate-400 mb-1">المواد:</div>
                 {completedSale.items.map((it: any, i: number) => (
                   <div key={i} className="py-1.5 flex justify-between items-center text-xs">
                     <div>
@@ -1167,7 +1225,7 @@ export const PosView: React.FC = () => {
                         <span>{it.quantity} {it.unitType === 'PACK' ? 'علبة' : 'شريط'} × {Number(it.unitPrice).toLocaleString()} د.ع</span>
                         {it.batchNumber && (
                           <span className="text-indigo-700 font-mono font-bold bg-indigo-50 px-1 py-0.2 rounded border border-indigo-200 text-[9px]">
-                            تشغيلة: {it.batchNumber}
+                            وجبة: {it.batchNumber}
                           </span>
                         )}
                       </div>
@@ -1180,19 +1238,22 @@ export const PosView: React.FC = () => {
               </div>
             )}
 
-            <div className="flex items-center gap-2 mt-5">
+            <div className="flex items-center gap-3 mt-6">
               <button
+                type="button"
                 onClick={() => window.print()}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5"
+                className="flex-1 py-3.5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-base font-black flex items-center justify-center gap-2 cursor-pointer shadow-md active:scale-95 transition-all"
               >
-                <Printer className="w-4 h-4" />
-                طباعة الوصل
+                <Printer className="w-5 h-5" />
+                <span>طباعة الوصل</span>
               </button>
               <button
+                type="button"
                 onClick={() => setCompletedSale(null)}
-                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold"
+                className="flex-1 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-base font-black flex items-center justify-center gap-2 cursor-pointer shadow-md active:scale-95 transition-all"
               >
-                إغلاق (بيع جديد)
+                <Plus className="w-5 h-5" />
+                <span>بيع جديد</span>
               </button>
             </div>
           </div>
