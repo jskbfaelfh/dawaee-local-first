@@ -100,6 +100,7 @@ export async function saveLocalInventoryBulk(items: LocalInventoryItem[]): Promi
     const tx = db.transaction('inventory', 'readwrite');
     const store = tx.objectStore('inventory');
 
+    store.clear();
     for (const item of items) {
       store.put(item);
     }
