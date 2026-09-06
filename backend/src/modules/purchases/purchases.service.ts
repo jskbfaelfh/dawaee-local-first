@@ -265,7 +265,12 @@ END $$;`;
       const netCostPack = purchasePricePack * (1 - discountPercent / 100);
       const unitsPerPack = Number(item.unitsPerPack) || 1;
       const sellingPricePack = Number(item.sellingPricePack) || 0;
-      const sellingPriceUnit = unitsPerPack > 0 ? (sellingPricePack / unitsPerPack) : sellingPricePack;
+      const rawUnitPrice = item.sellingPriceUnit && Number(item.sellingPriceUnit) > 0
+        ? Number(item.sellingPriceUnit)
+        : (unitsPerPack > 1 ? (sellingPricePack / unitsPerPack) : sellingPricePack);
+      const sellingPriceUnit = rawUnitPrice > 0
+        ? (unitsPerPack > 1 ? Math.max(250, Math.round(rawUnitPrice / 250) * 250) : rawUnitPrice)
+        : 0;
       const totalCost = quantityPacks * netCostPack;
       const totalPacks = quantityPacks + bonusPacks;
       const effectiveNetCostPack = totalPacks > 0
@@ -355,7 +360,11 @@ END $$;`;
         sellingPriceUnit > 0 ? sellingPriceUnit : inventoryItem?.selling_price_unit || 0,
       );
       if (resolvedSellingUnit <= 0 && resolvedSellingPack > 0 && resolvedUnits > 0) {
-        resolvedSellingUnit = Math.round(resolvedSellingPack / resolvedUnits);
+        resolvedSellingUnit = resolvedUnits > 1
+          ? Math.max(250, Math.round((resolvedSellingPack / resolvedUnits) / 250) * 250)
+          : resolvedSellingPack;
+      } else if (resolvedSellingUnit > 0 && resolvedUnits > 1) {
+        resolvedSellingUnit = Math.max(250, Math.round(resolvedSellingUnit / 250) * 250);
       }
       const resolvedShelf =
         item.shelfLocation && item.shelfLocation.trim().length > 0

@@ -1068,7 +1068,11 @@ END $$;`;
         0,
     );
     if (sellingPriceUnit === 0 && sellingPricePack > 0 && unitsPerPack > 0) {
-      sellingPriceUnit = Math.round(sellingPricePack / unitsPerPack);
+      sellingPriceUnit = unitsPerPack > 1
+        ? Math.max(250, Math.round((sellingPricePack / unitsPerPack) / 250) * 250)
+        : sellingPricePack;
+    } else if (sellingPriceUnit > 0 && unitsPerPack > 1) {
+      sellingPriceUnit = Math.max(250, Math.round(sellingPriceUnit / 250) * 250);
     }
 
     const shelfLocation = inventoryItem?.shelfLocation ? String(inventoryItem.shelfLocation).trim() : '';

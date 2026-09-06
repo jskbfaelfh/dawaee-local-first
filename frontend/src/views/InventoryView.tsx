@@ -19,6 +19,7 @@ import {
   Plus,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
+import { roundTo250, calculateStripPrice } from '../utils/currency';
 import { usePharmacyLiveSync } from '../hooks/usePharmacyLiveSync';
 import { BarcodeGeneratorModal } from '../components/BarcodeGeneratorModal';
 import { BatchTraceabilityModal } from '../components/BatchTraceabilityModal';
@@ -816,7 +817,7 @@ export const InventoryView: React.FC = () => {
                               <span className="text-[10px] text-slate-400 font-sans">/ علبة</span>
                             </b>
                             <span className="text-emerald-700 font-bold text-[11px] block">
-                              {Number(item.sellingPriceUnit || 0).toLocaleString()} د.ع{' '}
+                              {roundTo250(Number(item.sellingPriceUnit || 0)).toLocaleString()} د.ع{' '}
                               <span className="text-[10px] text-slate-400 font-sans">/ شريط</span>
                             </span>
                           </div>
@@ -1625,7 +1626,7 @@ export const InventoryView: React.FC = () => {
                       setQuickAddForm((prev) => ({
                         ...prev,
                         sellingPricePack: packPrice,
-                        sellingPriceUnit: units > 1 ? Math.round(packPrice / units) : packPrice,
+                        sellingPriceUnit: units > 1 ? calculateStripPrice(packPrice, units) : packPrice,
                       }));
                     }}
                     placeholder="مثال: 5000"
@@ -1638,7 +1639,7 @@ export const InventoryView: React.FC = () => {
                   <input
                     type="number"
                     min="0"
-                    step="50"
+                    step="250"
                     value={quickAddForm.sellingPriceUnit || ''}
                     onChange={(e) =>
                       setQuickAddForm((prev) => ({ ...prev, sellingPriceUnit: Number(e.target.value) || 0 }))
@@ -1679,7 +1680,7 @@ export const InventoryView: React.FC = () => {
                       setQuickAddForm((prev) => ({
                         ...prev,
                         unitsPerPack: units,
-                        sellingPriceUnit: units > 1 ? Math.round(packPrice / units) : packPrice,
+                        sellingPriceUnit: units > 1 ? calculateStripPrice(packPrice, units) : packPrice,
                       }));
                     }}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-black text-slate-900 focus:bg-white focus:border-indigo-600 focus:outline-hidden"

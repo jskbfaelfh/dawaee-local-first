@@ -23,7 +23,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
-import { roundTo250 } from '../utils/currency';
+import { roundTo250, calculateStripPrice } from '../utils/currency';
 import { usePharmacyLiveSync } from '../hooks/usePharmacyLiveSync';
 import { SmartSearchModal } from '../components/SmartSearchModal';
 import {
@@ -124,10 +124,11 @@ function calculateDynamicItemTotals(
       if (availUnits > 0) {
         const deductUnits = Math.min(availUnits, unitsLeft);
         const packPrice = Number(batch.sellingPricePack) || defaultPackPrice;
-        const unitPrice = Number(batch.sellingPriceUnit) || defaultUnitPrice;
+        const rawUnitPrice = Number(batch.sellingPriceUnit) || (unitsPerPk > 1 ? calculateStripPrice(packPrice, unitsPerPk) : defaultUnitPrice);
+        const unitPrice = roundTo250(rawUnitPrice);
         const pricePerUnit = isPack ? packPrice / unitsPerPk : unitPrice;
 
-        const lineCost = pricePerUnit * deductUnits;
+        const lineCost = isPack ? Math.round(pricePerUnit * deductUnits) : roundTo250(pricePerUnit * deductUnits);
         calculatedTotal += lineCost;
         unitsLeft -= deductUnits;
 
@@ -145,9 +146,10 @@ function calculateDynamicItemTotals(
     if (unitsLeft > 0) {
       const latest = sortedBatches[sortedBatches.length - 1];
       const packPrice = Number(latest.sellingPricePack) || defaultPackPrice;
-      const unitPrice = Number(latest.sellingPriceUnit) || defaultUnitPrice;
+      const rawUnitPrice = Number(latest.sellingPriceUnit) || (unitsPerPk > 1 ? calculateStripPrice(packPrice, unitsPerPk) : defaultUnitPrice);
+      const unitPrice = roundTo250(rawUnitPrice);
       const pricePerUnit = isPack ? packPrice / unitsPerPk : unitPrice;
-      const lineCost = pricePerUnit * unitsLeft;
+      const lineCost = isPack ? Math.round(pricePerUnit * unitsLeft) : roundTo250(pricePerUnit * unitsLeft);
       calculatedTotal += lineCost;
 
       const portionQty = isPack ? Math.round((unitsLeft / unitsPerPk) * 100) / 100 : unitsLeft;
@@ -160,7 +162,9 @@ function calculateDynamicItemTotals(
       });
     }
   } else {
-    const price = isPack ? defaultPackPrice : defaultUnitPrice;
+    const rawUnitPrice = defaultUnitPrice || (unitsPerPk > 1 ? calculateStripPrice(defaultPackPrice, unitsPerPk) : defaultPackPrice);
+    const unitPrice = roundTo250(rawUnitPrice);
+    const price = isPack ? defaultPackPrice : unitPrice;
     calculatedTotal = price * quantity;
     breakdown.push({
       batchNumber: '—',
@@ -170,8 +174,12 @@ function calculateDynamicItemTotals(
     });
   }
 
-  const effectiveUnitPrice = quantity > 0 ? calculatedTotal / quantity : isPack ? defaultPackPrice : defaultUnitPrice;
-  return { totalPrice: calculatedTotal, effectiveUnitPrice, breakdown };
+  const finalTotal = isPack ? Math.round(calculatedTotal) : roundTo250(calculatedTotal);
+  const effectiveUnitPrice = quantity > 0
+    ? (isPack ? Math.round(finalTotal / quantity) : roundTo250(finalTotal / quantity))
+    : (isPack ? defaultPackPrice : roundTo250(defaultUnitPrice));
+
+  return { totalPrice: finalTotal, effectiveUnitPrice, breakdown };
 }
 
 export const PosView: React.FC = () => {
@@ -401,7 +409,7 @@ export const PosView: React.FC = () => {
 
   const addToCart = (med: SearchMedicine, unitType: 'PACK' | 'STRIP', specificBatch?: ActiveBatchInfo) => {
     let packPrice = Number(med.sellingPricePack) || 0;
-    let unitPrice = Number(med.sellingPriceUnit) || 0;
+    let unitPrice = roundTo250(Number(med.sellingPriceUnit) || (med.unitsPerPack > 1 ? calculateStripPrice(packPrice, med.unitsPerPack) : packPrice));
 
     // If medicine from Master Catalog has no price set yet, prompt cashier
     if (packPrice === 0 && unitPrice === 0) {
@@ -413,7 +421,7 @@ export const PosView: React.FC = () => {
         return;
       }
       packPrice = Number(input);
-      unitPrice = med.unitsPerPack > 1 ? Math.round(packPrice / med.unitsPerPack) : packPrice;
+      unitPrice = med.unitsPerPack > 1 ? calculateStripPrice(packPrice, med.unitsPerPack) : packPrice;
       med.sellingPricePack = packPrice;
       med.sellingPriceUnit = unitPrice;
     }
@@ -477,7 +485,7 @@ export const PosView: React.FC = () => {
           unitsPerPack: med.unitsPerPack,
           activeBatches: med.activeBatches,
           defaultSellingPricePack: Number(med.sellingPricePack),
-          defaultSellingPriceUnit: Number(med.sellingPriceUnit),
+          defaultSellingPriceUnit: roundTo250(Number(med.sellingPriceUnit) || (med.unitsPerPack > 1 ? calculateStripPrice(Number(med.sellingPricePack), med.unitsPerPack) : Number(med.sellingPricePack))),
           breakdown,
         },
       ];
@@ -921,7 +929,7 @@ export const PosView: React.FC = () => {
                             <Layers className="w-4 h-4 stroke-[2.5]" />
                             <span>شريط</span>
                             <span className="font-mono font-bold bg-blue-700/50 px-2 py-0.5 rounded-lg text-blue-100">
-                              {Number(med.sellingPriceUnit).toLocaleString()} د.ع
+                              {roundTo250(Number(med.sellingPriceUnit) || calculateStripPrice(Number(med.sellingPricePack), med.unitsPerPack)).toLocaleString()} د.ع
                             </span>
                           </button>
                         )}
@@ -1009,12 +1017,12 @@ export const PosView: React.FC = () => {
                         <div className="flex items-center gap-1 flex-wrap">
                           {item.breakdown.map((b, bi) => (
                             <span key={bi} className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded-lg border border-slate-300 text-xs font-mono font-bold">
-                              {b.qty} × {Number(b.unitPrice).toLocaleString()} د.ع
+                              {b.qty} × {roundTo250(Number(b.unitPrice)).toLocaleString()} د.ع
                             </span>
                           ))}
                         </div>
                       ) : (
-                        <span className="font-mono font-bold text-slate-700">{Math.round(item.unitPrice).toLocaleString()} د.ع</span>
+                        <span className="font-mono font-bold text-slate-700">{roundTo250(item.unitPrice).toLocaleString()} د.ع</span>
                       )}
                     </div>
                   </div>
@@ -1040,7 +1048,7 @@ export const PosView: React.FC = () => {
 
                   {/* Line Total */}
                   <div className="w-20 sm:w-24 text-left font-black text-sm sm:text-base text-slate-900 font-mono shrink-0">
-                    {item.totalPrice.toLocaleString()} د.ع
+                    {roundTo250(item.totalPrice).toLocaleString()} د.ع
                   </div>
 
                   {/* Remove Button */}
@@ -1167,7 +1175,7 @@ export const PosView: React.FC = () => {
                     <div>
                       <div className="font-bold text-slate-800">{it.tradeName}</div>
                       <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1 flex-wrap">
-                        <span>{it.quantity} {it.unitType === 'PACK' ? 'علبة' : 'شريط'} × {Number(it.unitPrice).toLocaleString()} د.ع</span>
+                        <span>{it.quantity} {it.unitType === 'PACK' ? 'علبة' : 'شريط'} × {roundTo250(Number(it.unitPrice)).toLocaleString()} د.ع</span>
                         {it.batchNumber && (
                           <span className="text-indigo-700 font-mono font-bold bg-indigo-50 px-1 py-0.2 rounded border border-indigo-200 text-[9px]">
                             وجبة: {it.batchNumber}
@@ -1176,7 +1184,7 @@ export const PosView: React.FC = () => {
                       </div>
                     </div>
                     <div className="font-black text-slate-900 self-center font-mono">
-                      {Number(it.totalPrice).toLocaleString()} د.ع
+                      {roundTo250(Number(it.totalPrice)).toLocaleString()} د.ع
                     </div>
                   </div>
                 ))}
@@ -1375,8 +1383,8 @@ export const PosView: React.FC = () => {
                     </div>
                   </td>
                   <td className="text-center py-1">{item.quantity}</td>
-                  <td className="text-left py-1">{Number(item.unitPrice).toLocaleString()}</td>
-                  <td className="text-left py-1">{Number(item.totalPrice).toLocaleString()}</td>
+                  <td className="text-left py-1">{roundTo250(Number(item.unitPrice)).toLocaleString()}</td>
+                  <td className="text-left py-1">{roundTo250(Number(item.totalPrice)).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>
