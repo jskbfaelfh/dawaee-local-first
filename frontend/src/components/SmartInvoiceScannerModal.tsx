@@ -13,6 +13,7 @@ import {
   Clock,
   Tag,
   Hash,
+  BadgePercent,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { SmartExpiryInput } from './SmartExpiryInput';
@@ -79,6 +80,11 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Direct Overall Invoice Discount
+  const [directDiscountType, setDirectDiscountType] = useState<'AMOUNT' | 'PERCENT'>('AMOUNT');
+  const [directDiscountValue, setDirectDiscountValue] = useState<number>(0);
+
   const [showPriceChangesModal, setShowPriceChangesModal] = useState(false);
   const [changedItemsForReview, setChangedItemsForReview] = useState<ChangedPriceItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -212,6 +218,14 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
           setDiscountTiers([]);
         }
 
+        // Handle direct overall discount if detected by AI OCR
+        if (response.directDiscountAmount && Number(response.directDiscountAmount) > 0) {
+          setDirectDiscountType('AMOUNT');
+          setDirectDiscountValue(Number(response.directDiscountAmount));
+        } else {
+          setDirectDiscountValue(0);
+        }
+
         // Calculate initial total
         const total = formattedItems.reduce((acc, it) => {
           const netCost = it.purchasePricePack * (1 - it.discountPercent / 100);
@@ -329,14 +343,23 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
     return items.reduce((sum, it) => sum + (Number(it.quantityPacks) || 0) * (Number(it.purchasePricePack) || 0), 0);
   }, [items]);
 
-  const totalInvoiceAmount = useMemo(() => {
+  const itemsCostTotal = useMemo(() => {
     return items.reduce((sum, it) => {
       const netCost = (Number(it.purchasePricePack) || 0) * (1 - (Number(it.discountPercent) || 0) / 100);
       return sum + (Number(it.quantityPacks) || 0) * netCost;
     }, 0);
   }, [items]);
 
-  const totalDiscounts = grossInvoiceAmount - totalInvoiceAmount;
+  const itemsDiscounts = grossInvoiceAmount - itemsCostTotal;
+
+  const directDiscountAmount = useMemo(() => {
+    if (directDiscountType === 'PERCENT') {
+      return Math.round(itemsCostTotal * (Math.min(100, Math.max(0, directDiscountValue)) / 100));
+    }
+    return Math.min(itemsCostTotal, Math.max(0, directDiscountValue));
+  }, [itemsCostTotal, directDiscountType, directDiscountValue]);
+
+  const totalInvoiceAmount = Math.max(0, itemsCostTotal - directDiscountAmount);
   const remainingDebt = Math.max(0, totalInvoiceAmount - paidAmount);
 
   // Helper to compute deadline date
@@ -401,6 +424,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
         invoiceDate: new Date(invoiceDate).toISOString().slice(0, 10),
         totalAmount: Math.round(totalInvoiceAmount),
         paidAmount: Number(paidAmount) || 0,
+        directDiscountAmount: directDiscountAmount > 0 ? directDiscountAmount : undefined,
         discountTiers: discountTiers.filter((t) => t.discountPercent > 0),
         earlyDiscountDays: discountTiers.length > 0 ? discountTiers[0].daysLimit : undefined,
         earlyDiscountPercent: discountTiers.length > 0 ? discountTiers[0].discountPercent : undefined,
@@ -1104,29 +1128,74 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
               </div>
 
               {/* Financial Settlement Drawer */}
-              <div className="p-5 bg-white border border-slate-200 rounded-3xl grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs font-bold shadow-xs">
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
+              <div className="p-5 bg-white border border-slate-200 rounded-3xl grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs font-bold shadow-xs">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
                   <span className="text-slate-500 font-bold">إجمالي القائمة:</span>
                   <span className="font-mono text-sm text-slate-700">
                     {grossInvoiceAmount.toLocaleString()} د.ع
                   </span>
                 </div>
 
-                <div className="p-3.5 bg-amber-50/60 border border-amber-200 rounded-2xl flex items-center justify-between">
-                  <span className="text-amber-800 font-bold">الخصومات على المواد:</span>
+                <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-2xl flex items-center justify-between">
+                  <span className="text-amber-800 font-bold">خصومات المواد:</span>
                   <span className="font-mono text-sm text-amber-900 font-black">
-                    {Math.round(totalDiscounts).toLocaleString()} د.ع
+                    {Math.round(itemsDiscounts).toLocaleString()} د.ع
                   </span>
                 </div>
 
-                <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-2xl flex items-center justify-between">
+                <div className="p-3 bg-rose-50/60 border border-rose-200 rounded-2xl flex flex-col justify-between gap-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-rose-800 font-bold flex items-center gap-1">
+                      <BadgePercent className="w-3.5 h-3.5 text-rose-600" />
+                      خصم مباشر:
+                    </span>
+                    <div className="inline-flex rounded-lg bg-slate-200 p-0.5 text-[9px] font-black">
+                      <button
+                        type="button"
+                        onClick={() => setDirectDiscountType('AMOUNT')}
+                        className={`px-1.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                          directDiscountType === 'AMOUNT' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-600'
+                        }`}
+                      >
+                        د.ع
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDirectDiscountType('PERCENT')}
+                        className={`px-1.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                          directDiscountType === 'PERCENT' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-600'
+                        }`}
+                      >
+                        %
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min="0"
+                      step={directDiscountType === 'AMOUNT' ? '250' : '1'}
+                      value={directDiscountValue || ''}
+                      onChange={(e) => setDirectDiscountValue(Math.max(0, Number(e.target.value)))}
+                      placeholder={directDiscountType === 'AMOUNT' ? '0 د.ع' : '0 %'}
+                      className="w-full p-1 bg-white border border-rose-300 rounded-lg font-mono font-black text-rose-700 text-right text-xs focus:border-rose-500 focus:outline-hidden"
+                    />
+                    {directDiscountType === 'PERCENT' && directDiscountValue > 0 && (
+                      <span className="text-[10px] font-mono font-bold text-rose-700 whitespace-nowrap">
+                        ={directDiscountAmount.toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-emerald-50/60 border border-emerald-200 rounded-2xl flex items-center justify-between">
                   <span className="text-emerald-800 font-bold">الصافي المطلوب:</span>
                   <span className="font-mono text-base text-emerald-900 font-black">
                     {Math.round(totalInvoiceAmount).toLocaleString()} د.ع
                   </span>
                 </div>
 
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
                   <span className="text-slate-600 font-bold">المسدد للمذخر:</span>
                   <input
                     type="number"
@@ -1134,7 +1203,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                     step="500"
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(Number(e.target.value))}
-                    className="w-28 p-1.5 bg-white border border-slate-300 rounded-xl font-mono font-black text-emerald-700 text-right focus:border-emerald-500 focus:outline-hidden"
+                    className="w-24 p-1 bg-white border border-slate-300 rounded-xl font-mono font-black text-emerald-700 text-right focus:border-emerald-500 focus:outline-hidden"
                   />
                 </div>
               </div>

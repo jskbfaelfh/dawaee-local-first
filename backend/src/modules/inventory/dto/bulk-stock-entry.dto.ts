@@ -121,6 +121,20 @@ export class BulkStockEntryDto {
   @IsOptional()
   notes?: string;
 
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  directDiscountAmount?: number;
+
+  @IsString()
+  @IsOptional()
+  directDiscountType?: 'AMOUNT' | 'PERCENT';
+
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  directDiscountPercent?: number;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => BulkStockItemDto)

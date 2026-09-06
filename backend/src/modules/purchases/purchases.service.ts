@@ -195,6 +195,15 @@ END $$;`;
     }
 
     const totalGrossAmount = dto.items.reduce((sum: number, it: any) => sum + (Number(it.quantityPacks) || 0) * (Number(it.purchasePricePack) || 0), 0);
+    const subtotalAfterItemDiscounts = dto.items.reduce((sum: number, it: any) => {
+      const q = Number(it.quantityPacks) || 0;
+      const p = Number(it.purchasePricePack) || 0;
+      const d = Number(it.discountPercent) || 0;
+      return sum + q * p * (1 - d / 100);
+    }, 0);
+    const directDiscountAmount = dto.directDiscountAmount && Number(dto.directDiscountAmount) > 0
+      ? Number(dto.directDiscountAmount)
+      : Math.max(0, subtotalAfterItemDiscounts - totalAmount);
     const totalDiscountAmount = Math.max(0, totalGrossAmount - totalAmount);
 
     // 1. Insert into purchases table (standard unified system)
@@ -271,10 +280,15 @@ END $$;`;
       const sellingPriceUnit = rawUnitPrice > 0
         ? (unitsPerPack > 1 ? Math.max(250, Math.round(rawUnitPrice / 250) * 250) : rawUnitPrice)
         : 0;
-      const totalCost = quantityPacks * netCostPack;
+      const lineCostBeforeDirect = quantityPacks * netCostPack;
+      const lineShareOfDirectDiscount = subtotalAfterItemDiscounts > 0 && directDiscountAmount > 0
+        ? (lineCostBeforeDirect / subtotalAfterItemDiscounts) * directDiscountAmount
+        : 0;
+      const finalLineNet = Math.max(0, lineCostBeforeDirect - lineShareOfDirectDiscount);
+      const totalCost = finalLineNet;
       const totalPacks = quantityPacks + bonusPacks;
       const effectiveNetCostPack = totalPacks > 0
-        ? Number((totalCost / totalPacks).toFixed(2))
+        ? Number((finalLineNet / totalPacks).toFixed(2))
         : netCostPack;
       const totalUnits = Math.round(totalPacks * unitsPerPack);
 

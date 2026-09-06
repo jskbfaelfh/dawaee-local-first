@@ -598,8 +598,31 @@ END $$;`;
     const purchaseId = crypto.randomUUID();
 
     let invoiceGrossTotal = 0;
-    let invoiceDiscountTotal = 0;
-    let invoiceNetTotal = 0;
+    let itemDiscountsTotal = 0;
+    let subtotalBeforeDirectDiscount = 0;
+
+    for (const it of dto.items) {
+      const q = Number(it.quantityPacks || 1);
+      const p = Number(it.purchasePricePack || 0);
+      const d = Number(it.discountPercent || 0);
+      const gross = q * p;
+      const disc = gross * (d / 100);
+      const net = gross - disc;
+      invoiceGrossTotal += gross;
+      itemDiscountsTotal += disc;
+      subtotalBeforeDirectDiscount += net;
+    }
+
+    // Direct Discount calculation
+    let directDiscountAmount = 0;
+    if (dto.directDiscountAmount !== undefined && Number(dto.directDiscountAmount) > 0) {
+      directDiscountAmount = Math.min(subtotalBeforeDirectDiscount, Number(dto.directDiscountAmount));
+    } else if (dto.directDiscountType === 'PERCENT' && dto.directDiscountPercent && Number(dto.directDiscountPercent) > 0) {
+      directDiscountAmount = Math.round(subtotalBeforeDirectDiscount * (Math.min(100, Number(dto.directDiscountPercent)) / 100));
+    }
+
+    const invoiceDiscountTotal = itemDiscountsTotal + directDiscountAmount;
+    const invoiceNetTotal = Math.max(0, subtotalBeforeDirectDiscount - directDiscountAmount);
 
     const purchaseItemsToInsert: any[] = [];
 
@@ -641,12 +664,14 @@ END $$;`;
 
       const lineGrossCost = qtyPacks * purchasePricePack;
       const lineDiscountAmount = lineGrossCost * (discountPercent / 100);
-      const lineNetTotal = lineGrossCost - lineDiscountAmount;
-      const effectiveNetCostPerPack = totalPacksReceived > 0 ? lineNetTotal / totalPacksReceived : purchasePricePack;
+      const lineNetBeforeDirect = lineGrossCost - lineDiscountAmount;
 
-      invoiceGrossTotal += lineGrossCost;
-      invoiceDiscountTotal += lineDiscountAmount;
-      invoiceNetTotal += lineNetTotal;
+      // Allocate share of direct discount proportionally across items
+      const lineShareOfDirect = subtotalBeforeDirectDiscount > 0 && directDiscountAmount > 0
+        ? (lineNetBeforeDirect / subtotalBeforeDirectDiscount) * directDiscountAmount
+        : 0;
+      const finalLineNet = Math.max(0, lineNetBeforeDirect - lineShareOfDirect);
+      const effectiveNetCostPerPack = totalPacksReceived > 0 ? finalLineNet / totalPacksReceived : purchasePricePack;
 
       // 1.3 Format Expiry Date: YYYY-MM-01
       const expiryDateStr = `${item.expiryYear}-${String(item.expiryMonth).padStart(2, '0')}-01`;
@@ -762,6 +787,10 @@ END $$;`;
     }
     const remainingAmount = Math.max(0, invoiceNetTotal - paidAmount);
 
+    const finalNotes = directDiscountAmount > 0
+      ? [dto.notes, `خصم مباشر: ${directDiscountAmount.toLocaleString()} د.ع`].filter(Boolean).join(' | ')
+      : dto.notes || null;
+
     // 3. Record Purchase Header
     await this.prisma.$executeRawUnsafe(
       `INSERT INTO "${schemaName}".purchases
@@ -778,7 +807,7 @@ END $$;`;
       remainingAmount,
       paymentStatus,
       dto.dueDate || null,
-      dto.notes || null,
+      finalNotes,
     );
 
     // 4. Record Purchase Line Items

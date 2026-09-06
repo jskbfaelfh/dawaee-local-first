@@ -102,6 +102,11 @@ export class CreatePurchaseDto {
   @IsOptional()
   discountTiers?: any[];
 
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  directDiscountAmount?: number;
+
   @IsString()
   @IsOptional()
   notes?: string;

@@ -17,6 +17,7 @@ import {
   Clock,
   ArrowDownLeft,
   Tag,
+  BadgePercent,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { roundTo250, calculateStripPrice } from '../utils/currency';
@@ -62,6 +63,10 @@ export const BulkStockEntryView: React.FC = () => {
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [dueDate, setDueDate] = useState<string>('');
   const [notes, setNotes] = useState('');
+
+  // Direct Overall Invoice Discount
+  const [directDiscountType, setDirectDiscountType] = useState<'AMOUNT' | 'PERCENT'>('AMOUNT');
+  const [directDiscountValue, setDirectDiscountValue] = useState<number>(0);
 
   // Price changes review modal state
   const [showPriceChangesModal, setShowPriceChangesModal] = useState(false);
@@ -240,17 +245,24 @@ export const BulkStockEntryView: React.FC = () => {
 
   // Calculations
   const grossTotal = items.reduce((sum, i) => sum + Number(i.purchasePricePack || 0) * Number(i.quantityPacks || 0), 0);
-  const totalDiscount = items.reduce(
+  const itemsDiscountTotal = items.reduce(
     (sum, i) =>
       sum +
       Number(i.purchasePricePack || 0) * Number(i.quantityPacks || 0) * (Number(i.discountPercent || 0) / 100),
     0,
   );
+  const subtotalAfterItemsDiscount = Math.max(0, grossTotal - itemsDiscountTotal);
+
+  const directDiscountAmount = directDiscountType === 'PERCENT'
+    ? roundTo250(Math.round(subtotalAfterItemsDiscount * (Math.min(100, Math.max(0, directDiscountValue)) / 100)))
+    : roundTo250(Math.min(subtotalAfterItemsDiscount, Math.max(0, directDiscountValue)));
+
+  const totalDiscount = itemsDiscountTotal + directDiscountAmount;
   const totalBonusValue = items.reduce(
     (sum, i) => sum + Number(i.bonusPacks || 0) * Number(i.purchasePricePack || 0),
     0,
   );
-  const netInvoiceTotal = roundTo250(Math.max(0, grossTotal - totalDiscount));
+  const netInvoiceTotal = roundTo250(Math.max(0, subtotalAfterItemsDiscount - directDiscountAmount));
 
   // Update paid amount automatically when payment status or total changes
   useEffect(() => {
@@ -357,6 +369,9 @@ export const BulkStockEntryView: React.FC = () => {
         paidAmount: Number(paidAmount),
         dueDate: dueDate || undefined,
         notes: notes || undefined,
+        directDiscountAmount: directDiscountAmount > 0 ? directDiscountAmount : undefined,
+        directDiscountType,
+        directDiscountPercent: directDiscountType === 'PERCENT' && directDiscountValue > 0 ? directDiscountValue : undefined,
         items: items.map((i) => ({
           medicineId: i.medicineId,
           customName: i.customName || undefined,
@@ -400,6 +415,7 @@ export const BulkStockEntryView: React.FC = () => {
       setPaidAmount(0);
       setDueDate('');
       setNotes('');
+      setDirectDiscountValue(0);
       fetchSuppliers();
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'فشل حفظ الوجبة' });
@@ -429,7 +445,9 @@ export const BulkStockEntryView: React.FC = () => {
 
             {totalDiscount > 0 && (
               <div className="bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-200 text-right">
-                <span className="text-[11px] font-bold text-rose-700 block">الخصم</span>
+                <span className="text-[11px] font-bold text-rose-700 block">
+                  الخصم {directDiscountAmount > 0 ? `(مباشر: ${directDiscountAmount.toLocaleString()})` : ''}
+                </span>
                 <span className="text-sm font-black text-rose-800">-{totalDiscount.toLocaleString()} د.ع</span>
               </div>
             )}
@@ -458,7 +476,7 @@ export const BulkStockEntryView: React.FC = () => {
         </div>
 
         {/* 2. Supplier & Payment Info Section */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 pt-1">
           {/* Supplier Selector / Name */}
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1">
@@ -513,6 +531,52 @@ export const BulkStockEntryView: React.FC = () => {
               placeholder="مثال: INV-98231"
               className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-mono font-bold"
             />
+          </div>
+
+          {/* Direct Overall Invoice Discount */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-bold text-slate-700 flex items-center gap-1">
+                <BadgePercent className="w-3.5 h-3.5 text-rose-600" />
+                خصم مباشر للفاتورة
+              </label>
+              <div className="inline-flex rounded-lg bg-slate-200 p-0.5 text-[10px] font-black">
+                <button
+                  type="button"
+                  onClick={() => setDirectDiscountType('AMOUNT')}
+                  className={`px-1.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                    directDiscountType === 'AMOUNT' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  د.ع
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDirectDiscountType('PERCENT')}
+                  className={`px-1.5 py-0.5 rounded-md transition-all cursor-pointer ${
+                    directDiscountType === 'PERCENT' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  %
+                </button>
+              </div>
+            </div>
+            <div className="relative">
+              <input
+                type="number"
+                min="0"
+                step={directDiscountType === 'AMOUNT' ? '250' : '1'}
+                value={directDiscountValue || ''}
+                onChange={(e) => setDirectDiscountValue(Math.max(0, Number(e.target.value)))}
+                placeholder={directDiscountType === 'AMOUNT' ? 'مبلغ الخصم د.ع...' : 'نسبة الخصم %...'}
+                className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-rose-700 font-mono placeholder:text-slate-400 focus:bg-white focus:border-rose-500 focus:outline-hidden"
+              />
+              {directDiscountType === 'PERCENT' && directDiscountValue > 0 && (
+                <span className="absolute left-2 top-1.5 text-[10px] font-mono font-bold text-rose-600">
+                  = {directDiscountAmount.toLocaleString()} د.ع
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Payment Status (Cash / Credit / Partial) */}

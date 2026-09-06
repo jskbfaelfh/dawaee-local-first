@@ -37,6 +37,7 @@ export interface ScannedInvoiceResult {
   supplierName: string;
   invoiceDate: string;
   totalAmount: number;
+  directDiscountAmount?: number | null;
   earlyDiscountDays?: number | null;
   earlyDiscountPercent?: number | null;
   discountMonths?: number | null;
@@ -379,6 +380,7 @@ export class OcrAiService {
       supplierName: aiParsedData.supplierName ? String(aiParsedData.supplierName) : 'مذخر أدوية',
       invoiceDate: aiParsedData.invoiceDate ? String(aiParsedData.invoiceDate) : new Date().toISOString().slice(0, 10),
       totalAmount: Number(aiParsedData.totalAmount) || calculatedTotal,
+      directDiscountAmount: Number(aiParsedData.directDiscountAmount) || 0,
       earlyDiscountDays: discountTiers.length > 0 ? discountTiers[0].daysLimit : null,
       earlyDiscountPercent: discountTiers.length > 0 ? discountTiers[0].discountPercent : null,
       discountMonths: discountTiers.length > 0 ? discountTiers.length : null,
@@ -518,12 +520,17 @@ export class OcrAiService {
          ]
          If no payment discount is mentioned, return empty array [].
 
+      DIRECT OVERALL INVOICE DISCOUNT:
+      8. Check the invoice totals or footer for any overall direct discount (e.g. "خصم مباشر", "خصم خاص", "خصم نقدي", "تنزيلات", "Direct Discount", "Cash Discount", "Special Discount"):
+         Extract into "directDiscountAmount": number (or 0 if none).
+
       Required Output JSON Format:
       {
         "invoiceNumber": "string",
         "supplierName": "string",
         "invoiceDate": "YYYY-MM-DD",
         "totalAmount": number,
+        "directDiscountAmount": number,
         "discountTiers": [
           { "monthIndex": 1, "daysLimit": 30, "discountPercent": 6 }
         ],
