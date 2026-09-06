@@ -277,31 +277,6 @@ export const PosView: React.FC = () => {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Check active server / cloud DB connectivity
-  const checkConnectivity = async (): Promise<boolean> => {
-    if (!navigator.onLine) {
-      setIsOnline(false);
-      return false;
-    }
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch('/api/health', { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (res.ok) {
-        const data = await res.json();
-        const connected = data.database === 'connected';
-        setIsOnline(connected);
-        return connected;
-      }
-      setIsOnline(false);
-      return false;
-    } catch {
-      setIsOnline(false);
-      return false;
-    }
-  };
-
   // Refresh pending offline sales counter
   const refreshPendingCount = async () => {
     try {
@@ -349,8 +324,7 @@ export const PosView: React.FC = () => {
         text: `تمت مزامنة (${res.syncedCount}) فواتير تم بيعها أثناء انقطاع الإنترنت بنجاح مع السحابة! ☁️✅`,
       });
     } catch (err: any) {
-      console.warn('Sync postponed, cloud database not yet reachable:', err);
-      setIsOnline(false);
+      console.warn('Sync failed or postponed:', err);
     } finally {
       setIsSyncing(false);
     }
@@ -361,16 +335,14 @@ export const PosView: React.FC = () => {
     searchInputRef.current?.focus();
 
     const warmCache = async () => {
-      const online = await checkConnectivity();
-      if (online) {
+      if (navigator.onLine) {
         try {
           const fullInv = await apiRequest<SearchMedicine[]>('/inventory');
           if (Array.isArray(fullInv) && fullInv.length > 0) {
             await cacheInventoryLocally(fullInv);
           }
         } catch (err) {
-          console.warn('Could not warm inventory cache from server, operating locally', err);
-          setIsOnline(false);
+          console.warn('Could not warm inventory cache from server', err);
         }
       }
       refreshPendingCount();
@@ -378,13 +350,11 @@ export const PosView: React.FC = () => {
     warmCache();
   }, []);
 
-  // Online / Offline Listeners & Periodic Background Health Heartbeat
+  // Online / Offline Listeners & Auto-Sync
   useEffect(() => {
-    const handleOnline = async () => {
-      const online = await checkConnectivity();
-      if (online) {
-        syncPendingSales();
-      }
+    const handleOnline = () => {
+      setIsOnline(true);
+      syncPendingSales();
     };
     const handleOffline = () => {
       setIsOnline(false);
@@ -393,29 +363,13 @@ export const PosView: React.FC = () => {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Heartbeat: Check connection every 15 seconds to gracefully auto-recover when internet restores
-    const heartbeat = setInterval(async () => {
-      const wasOffline = !isOnline;
-      const nowOnline = await checkConnectivity();
-      if (wasOffline && nowOnline) {
-        syncPendingSales();
-        try {
-          const fullInv = await apiRequest<SearchMedicine[]>('/inventory');
-          if (Array.isArray(fullInv) && fullInv.length > 0) {
-            await cacheInventoryLocally(fullInv);
-          }
-        } catch {}
-      }
-    }, 15000);
-
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      clearInterval(heartbeat);
     };
-  }, [isOnline]);
+  }, []);
 
-  // Search medicines (Smart Instant Failover: Instant local search if offline, server search if online)
+  // Search medicines (Online with seamless Offline fallback)
   useEffect(() => {
     if (searchTerm.trim().length === 0) {
       setSearchResults([]);
@@ -423,36 +377,27 @@ export const PosView: React.FC = () => {
     }
 
     const timer = setTimeout(async () => {
-      // 1. If currently offline, search directly in local IndexedDB (0ms latency, zero 500 errors in console)
-      if (!isOnline || !navigator.onLine) {
+      if (navigator.onLine) {
         try {
-          const localData = await searchLocalInventory(searchTerm);
-          setSearchResults(localData);
+          const data = await apiRequest<SearchMedicine[]>(`/inventory?search=${encodeURIComponent(searchTerm)}`);
+          setSearchResults(Array.isArray(data) ? data : []);
+          return;
         } catch (err) {
-          console.error('Offline search error:', err);
+          console.warn('Online search failed, falling back to local IndexedDB', err);
         }
-        return;
       }
 
-      // 2. If online, attempt server search
+      // Offline search fallback
       try {
-        const data = await apiRequest<SearchMedicine[]>(`/inventory?search=${encodeURIComponent(searchTerm)}`);
-        setSearchResults(Array.isArray(data) ? data : []);
-        return;
+        const localData = await searchLocalInventory(searchTerm);
+        setSearchResults(localData);
       } catch (err) {
-        console.warn('Online search failed, immediately switching to offline mode', err);
-        setIsOnline(false); // Immediate circuit breaker!
-        try {
-          const localData = await searchLocalInventory(searchTerm);
-          setSearchResults(localData);
-        } catch (localErr) {
-          console.error('Offline fallback search error:', localErr);
-        }
+        console.error('Offline search error:', err);
       }
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [searchTerm, isOnline]);
+  }, [searchTerm]);
 
   const addToCart = (med: SearchMedicine, unitType: 'PACK' | 'STRIP', specificBatch?: ActiveBatchInfo) => {
     let packPrice = Number(med.sellingPricePack) || 0;
