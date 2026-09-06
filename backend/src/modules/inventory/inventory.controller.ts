@@ -102,8 +102,24 @@ export class InventoryController {
 
   @Get('smart-expiry-summary')
   @Roles('OWNER')
-  async getSmartExpirySummary() {
-    return this.inventoryService.getSmartExpirySummary();
+  async getSmartExpirySummary(
+    @Query('search') search?: string,
+    @Query('supplierId') supplierId?: string,
+    @Query('months') months?: string,
+    @Query('allBatches') allBatches?: string,
+    @Query('tier') tier?: string,
+    @Query('year') year?: string,
+    @Query('month') month?: string,
+  ) {
+    return this.inventoryService.getSmartExpirySummary({
+      search,
+      supplierId,
+      months: months ? Number(months) : undefined,
+      allBatches: allBatches === 'true' || allBatches === '1',
+      tier,
+      year: year ? Number(year) : undefined,
+      month: month ? Number(month) : undefined,
+    });
   }
 
   @Get('shortages-by-supplier')

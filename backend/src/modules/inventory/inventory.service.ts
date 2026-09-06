@@ -1450,9 +1450,61 @@ END $$;`;
   /**
    * Comprehensive Smart Expiry Analytics with Tier Breakdown & Financial Risk Assessment
    */
-  async getSmartExpirySummary() {
+  async getSmartExpirySummary(options?: {
+    search?: string;
+    supplierId?: string;
+    months?: number;
+    allBatches?: boolean;
+    tier?: string;
+    year?: number;
+    month?: number;
+  }) {
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
+
+    const conditions: string[] = ['b.quantity_units_remaining > 0'];
+    const params: any[] = [];
+
+    // If not allBatches and no search/year/tier specified, default to 180 days for fast summary
+    if (!options?.allBatches && !options?.search && !options?.year && !options?.month && !options?.tier && !options?.months) {
+      conditions.push(`b.expiry_date <= (CURRENT_DATE + interval '180 days')`);
+    } else if (options?.months && options.months > 0) {
+      params.push(options.months);
+      conditions.push(`b.expiry_date <= (CURRENT_DATE + ($${params.length} || ' months')::interval)`);
+    }
+
+    if (options?.supplierId) {
+      params.push(options.supplierId);
+      conditions.push(`b.supplier_id = $${params.length}::uuid`);
+    }
+
+    if (options?.year) {
+      params.push(options.year);
+      conditions.push(`EXTRACT(YEAR FROM b.expiry_date) = $${params.length}`);
+    }
+
+    if (options?.month) {
+      params.push(options.month);
+      conditions.push(`EXTRACT(MONTH FROM b.expiry_date) = $${params.length}`);
+    }
+
+    if (options?.search && options.search.trim().length > 0) {
+      const q = options.search.trim();
+      params.push(`%${q}%`);
+      const pIdx = params.length;
+      conditions.push(`(
+        COALESCE(i.custom_name, m.trade_name) ILIKE $${pIdx}
+        OR m.scientific_name ILIKE $${pIdx}
+        OR m.barcode ILIKE $${pIdx}
+        OR b.batch_number ILIKE $${pIdx}
+        OR s.name ILIKE $${pIdx}
+        OR TO_CHAR(b.expiry_date, 'MM/YYYY') ILIKE $${pIdx}
+        OR TO_CHAR(b.expiry_date, 'YYYY-MM') ILIKE $${pIdx}
+        OR TO_CHAR(b.expiry_date, 'YYYY') ILIKE $${pIdx}
+      )`);
+    }
+
+    const whereClause = conditions.join(' AND ');
 
     const sql = `
       SELECT 
@@ -1469,6 +1521,7 @@ END $$;`;
         b.is_recalled as "isRecalled",
         i.id as "inventoryItemId",
         i.units_per_pack as "unitsPerPack",
+        i.shelf_location as "shelfLocation",
         COALESCE(i.custom_name, m.trade_name) as "tradeName",
         m.scientific_name as "scientificName",
         m.dosage_form as "dosageForm",
@@ -1488,6 +1541,7 @@ END $$;`;
           WHEN b.expiry_date <= (CURRENT_DATE + interval '60 days') THEN 'DAYS_60'
           WHEN b.expiry_date <= (CURRENT_DATE + interval '90 days') THEN 'DAYS_90'
           WHEN b.expiry_date <= (CURRENT_DATE + interval '180 days') THEN 'DAYS_180'
+          WHEN b.expiry_date <= (CURRENT_DATE + interval '365 days') THEN 'YEAR_1'
           ELSE 'SAFE'
         END as "expiryTier"
       FROM "${schemaName}".inventory_batches b
@@ -1495,12 +1549,11 @@ END $$;`;
       LEFT JOIN public.medicines m ON i.medicine_id = m.id
       LEFT JOIN "${schemaName}".suppliers s ON b.supplier_id = s.id
       LEFT JOIN "${schemaName}".purchases p ON b.purchase_id = p.id
-      WHERE b.quantity_units_remaining > 0
-        AND b.expiry_date <= (CURRENT_DATE + interval '180 days')
+      WHERE ${whereClause}
       ORDER BY b.expiry_date ASC;
     `;
 
-    const batches: any[] = await this.prisma.$queryRawUnsafe(sql);
+    const batches: any[] = await this.prisma.$queryRawUnsafe(sql, ...params);
 
     // Calculate aggregated metrics by tier
     const tiers: Record<string, { count: number; totalPacks: number; totalCost: number; totalSelling: number; label: string; badgeColor: string }> = {
@@ -1509,11 +1562,13 @@ END $$;`;
       DAYS_60: { count: 0, totalPacks: 0, totalCost: 0, totalSelling: 0, label: '31 - 60 يوم', badgeColor: 'orange' },
       DAYS_90: { count: 0, totalPacks: 0, totalCost: 0, totalSelling: 0, label: '61 - 90 يوم', badgeColor: 'amber' },
       DAYS_180: { count: 0, totalPacks: 0, totalCost: 0, totalSelling: 0, label: '91 - 180 يوم', badgeColor: 'emerald' },
+      YEAR_1: { count: 0, totalPacks: 0, totalCost: 0, totalSelling: 0, label: '6 - 12 شهر', badgeColor: 'blue' },
+      SAFE: { count: 0, totalPacks: 0, totalCost: 0, totalSelling: 0, label: 'أكثر من سنة', badgeColor: 'slate' },
     };
 
     let totalAtRiskCost = 0;
     let totalAtRiskSelling = 0;
-    const totalBatchesAtRisk = batches.length;
+    let totalBatchesAtRisk = 0;
 
     for (const b of batches) {
       const tierKey = b.expiryTier;
@@ -1523,18 +1578,26 @@ END $$;`;
         tiers[tierKey].totalCost += Number(b.totalCostValue) || 0;
         tiers[tierKey].totalSelling += Number(b.totalSellingValue) || 0;
       }
-      totalAtRiskCost += Number(b.totalCostValue) || 0;
-      totalAtRiskSelling += Number(b.totalSellingValue) || 0;
+      if (tierKey !== 'SAFE') {
+        totalBatchesAtRisk += 1;
+        totalAtRiskCost += Number(b.totalCostValue) || 0;
+        totalAtRiskSelling += Number(b.totalSellingValue) || 0;
+      }
     }
+
+    const filteredBatches = options?.tier && options.tier !== 'ALL'
+      ? batches.filter((b) => b.expiryTier === options.tier)
+      : batches;
 
     return {
       summary: {
+        totalBatches: batches.length,
         totalBatchesAtRisk,
         totalAtRiskCost,
         totalAtRiskSelling,
         tiers,
       },
-      batches,
+      batches: filteredBatches,
     };
   }
 

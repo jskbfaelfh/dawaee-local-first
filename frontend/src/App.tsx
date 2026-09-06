@@ -21,10 +21,12 @@ import {
   RefreshCw,
   Pin,
   PinOff,
+  Clock,
 } from 'lucide-react';
 import { PosView } from './views/PosView';
 import { BulkStockEntryView } from './views/BulkStockEntryView';
 import { InventoryView } from './views/InventoryView';
+import { ExpiryView } from './views/ExpiryView';
 import { PurchasesView } from './views/PurchasesView';
 import { ExpensesView } from './views/ExpensesView';
 import { OwnerMobileDashboardView } from './views/OwnerMobileDashboardView';
@@ -51,6 +53,7 @@ type ActiveTab =
   | 'POS'
   | 'BULK_STOCK'
   | 'INVENTORY'
+  | 'EXPIRY'
   | 'PURCHASES'
   | 'EXPENSES'
   | 'CHAIN'
@@ -434,6 +437,12 @@ export const App: React.FC = () => {
                 activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
               />
               <NavItem
+                tab="EXPIRY"
+                label="الإكسباير"
+                icon={Clock}
+                activeColor="bg-purple-600 text-white shadow-md shadow-purple-900/30"
+              />
+              <NavItem
                 tab="PURCHASES"
                 label="المشتريات"
                 icon={FileText}
@@ -689,7 +698,8 @@ export const App: React.FC = () => {
         <main className="flex-1 overflow-y-auto p-2 sm:p-5 w-full max-w-full overflow-x-hidden">
           {activeTab === 'POS' && <PosView />}
           {activeTab === 'BULK_STOCK' && <BulkStockEntryView />}
-          {activeTab === 'INVENTORY' && <InventoryView />}
+          {activeTab === 'INVENTORY' && <InventoryView onNavigateToExpiry={() => navigateToTab('EXPIRY')} />}
+          {activeTab === 'EXPIRY' && <ExpiryView onNavigateToInventory={() => navigateToTab('INVENTORY')} />}
           {activeTab === 'PURCHASES' && <PurchasesView />}
           {activeTab === 'EXPENSES' && <ExpensesView />}
           {activeTab === 'CHAIN' && (
@@ -716,7 +726,7 @@ export const App: React.FC = () => {
           onClose={() => setShowAlertModal(false)}
           onNavigateToInventory={() => {
             setShowAlertModal(false);
-            setActiveTab('INVENTORY');
+            navigateToTab('EXPIRY');
           }}
         />
       )}
