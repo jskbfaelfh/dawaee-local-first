@@ -44,6 +44,7 @@ export class PosService {
           ALTER TABLE "${schemaName}".sales ADD COLUMN IF NOT EXISTS offline_id VARCHAR(100);
           CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_sales_offline_id" 
             ON "${schemaName}".sales (offline_id) WHERE offline_id IS NOT NULL;
+          ALTER TABLE "${schemaName}".sale_items ALTER COLUMN quantity TYPE DECIMAL(12, 2);
           ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS cost_price_pack DECIMAL(12, 2) DEFAULT 0;
           ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS cost_price_unit DECIMAL(12, 2) DEFAULT 0;
           ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS total_cost DECIMAL(12, 2) DEFAULT 0;
@@ -64,6 +65,7 @@ export class PosService {
       await this.prisma.$executeRawUnsafe(`
         DO $$ 
         BEGIN
+          ALTER TABLE "${schemaName}".returns ALTER COLUMN quantity TYPE DECIMAL(12, 2);
           ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS inventory_batch_id UUID;
           ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS item_condition VARCHAR(20) DEFAULT 'RESALEABLE';
           ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'CASH';
@@ -151,9 +153,21 @@ export class PosService {
     }
     const itemIds = rawItemIds.sort();
 
-    let invoiceNumber = this.generateInvoiceNumber();
+    let invoiceNumber = (dto.offlineInvoiceNumber && dto.offlineInvoiceNumber.trim())
+      ? dto.offlineInvoiceNumber.trim()
+      : this.generateInvoiceNumber();
     let saleId = crypto.randomUUID();
     let transactionResult: any = null;
+
+    // Group explicit allocated batches by inventoryItemId if provided by offline sync
+    const allocatedBatchesByItem = new Map<string, any[]>();
+    if (dto.allocatedBatches && Array.isArray(dto.allocatedBatches)) {
+      for (const ab of dto.allocatedBatches) {
+        const list = allocatedBatchesByItem.get(ab.inventoryItemId) || [];
+        list.push(ab);
+        allocatedBatchesByItem.set(ab.inventoryItemId, list);
+      }
+    }
 
     // 3. Execute checkout inside an ACID Transaction with Row-Level Locking and Retry for collision resilience
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -177,7 +191,7 @@ export class PosService {
 
             // B. Fetch and acquire exclusive row locks (FOR UPDATE) on all active inventory batches
             const batchesRows: any[] = await tx.$queryRawUnsafe(
-              `SELECT id, inventory_item_id, quantity_units_remaining, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date 
+              `SELECT id, inventory_item_id, batch_number, quantity_units_remaining, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date 
                FROM "${schemaName}".inventory_batches 
                WHERE inventory_item_id = ANY($1::uuid[]) 
                  AND expiry_date >= CURRENT_DATE
@@ -198,7 +212,7 @@ export class PosService {
             const lineItemsToInsert: any[] = [];
             const affectedMedicineIds: string[] = [];
 
-            // C. FEFO Allocation loop with atomic row updates
+            // C. Batch Allocation loop (Preserves offline allocated batches, falls back to FEFO)
             for (const item of dto.items) {
               const invItem = itemMap.get(item.inventoryItemId);
               if (!invItem) {
@@ -219,50 +233,106 @@ export class PosService {
 
               const availableBatches = batchesByItemMap.get(item.inventoryItemId) || [];
 
-              for (const batch of availableBatches) {
-                if (unitsLeftToDeduct <= 0) break;
-                const batchRemaining = Number(batch.quantity_units_remaining);
-                if (batchRemaining <= 0) continue;
+              // If specific allocated batches were passed from offline POS
+              const explicitAllocations = allocatedBatchesByItem.get(item.inventoryItemId) || [];
+              if (explicitAllocations.length > 0) {
+                for (const alloc of explicitAllocations) {
+                  if (unitsLeftToDeduct <= 0) break;
+                  const targetBatch = availableBatches.find(
+                    (b) => (alloc.batchId && b.id === alloc.batchId) || (alloc.batchNumber && b.batch_number === alloc.batchNumber),
+                  );
+                  if (targetBatch && Number(targetBatch.quantity_units_remaining) > 0) {
+                    const batchRemaining = Number(targetBatch.quantity_units_remaining);
+                    const unitsToTake = Math.min(unitsLeftToDeduct, alloc.units, batchRemaining);
 
-                const deductionFromThisBatch = Math.min(unitsLeftToDeduct, batchRemaining);
+                    await tx.$executeRawUnsafe(
+                      `UPDATE "${schemaName}".inventory_batches 
+                       SET quantity_units_remaining = quantity_units_remaining - $1 
+                       WHERE id = $2::uuid`,
+                      unitsToTake,
+                      targetBatch.id,
+                    );
 
-                await tx.$executeRawUnsafe(
-                  `UPDATE "${schemaName}".inventory_batches 
-                   SET quantity_units_remaining = quantity_units_remaining - $1 
-                   WHERE id = $2::uuid`,
-                  deductionFromThisBatch,
-                  batch.id,
-                );
+                    targetBatch.quantity_units_remaining = batchRemaining - unitsToTake;
+                    unitsLeftToDeduct -= unitsToTake;
 
-                batch.quantity_units_remaining = batchRemaining - deductionFromThisBatch;
-                unitsLeftToDeduct -= deductionFromThisBatch;
+                    const batchPackPrice = targetBatch.selling_price_pack != null ? Number(targetBatch.selling_price_pack) : defaultPackPrice;
+                    const batchUnitPrice = targetBatch.selling_price_unit != null ? Number(targetBatch.selling_price_unit) : defaultUnitPrice;
 
-                const batchPackPrice = batch.selling_price_pack != null ? Number(batch.selling_price_pack) : defaultPackPrice;
-                const batchUnitPrice = batch.selling_price_unit != null ? Number(batch.selling_price_unit) : defaultUnitPrice;
+                    const allocatedQty = isPack ? Math.round((unitsToTake / unitsPerPack) * 100) / 100 : unitsToTake;
+                    const priceApplied = isPack ? batchPackPrice : batchUnitPrice;
+                    const lineTotal = priceApplied * allocatedQty;
 
-                const allocatedQty = isPack ? Math.round((deductionFromThisBatch / unitsPerPack) * 100) / 100 : deductionFromThisBatch;
-                const priceApplied = isPack ? batchPackPrice : batchUnitPrice;
-                const lineTotal = priceApplied * allocatedQty;
+                    const costPricePack = Number(targetBatch.purchase_price_pack) || 0;
+                    const costPriceUnit = unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack;
+                    const lineCost = isPack ? costPricePack * allocatedQty : costPriceUnit * allocatedQty;
 
-                const costPricePack = Number(batch.purchase_price_pack) || 0;
-                const costPriceUnit = unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack;
-                const lineCost = isPack ? costPricePack * allocatedQty : costPriceUnit * allocatedQty;
+                    subtotal += lineTotal;
 
-                subtotal += lineTotal;
+                    lineItemsToInsert.push({
+                      id: crypto.randomUUID(),
+                      saleId,
+                      inventoryItemId: item.inventoryItemId,
+                      inventoryBatchId: targetBatch.id,
+                      unitType: item.unitType,
+                      quantity: allocatedQty,
+                      unitPrice: priceApplied,
+                      totalPrice: lineTotal,
+                      costPricePack,
+                      costPriceUnit,
+                      totalCost: lineCost,
+                    });
+                  }
+                }
+              }
 
-                lineItemsToInsert.push({
-                  id: crypto.randomUUID(),
-                  saleId,
-                  inventoryItemId: item.inventoryItemId,
-                  inventoryBatchId: batch.id,
-                  unitType: item.unitType,
-                  quantity: allocatedQty,
-                  unitPrice: priceApplied,
-                  totalPrice: lineTotal,
-                  costPricePack,
-                  costPriceUnit,
-                  totalCost: lineCost,
-                });
+              // Standard FEFO for remaining units or when no offline batch allocations specified
+              if (unitsLeftToDeduct > 0) {
+                for (const batch of availableBatches) {
+                  if (unitsLeftToDeduct <= 0) break;
+                  const batchRemaining = Number(batch.quantity_units_remaining);
+                  if (batchRemaining <= 0) continue;
+
+                  const deductionFromThisBatch = Math.min(unitsLeftToDeduct, batchRemaining);
+
+                  await tx.$executeRawUnsafe(
+                    `UPDATE "${schemaName}".inventory_batches 
+                     SET quantity_units_remaining = quantity_units_remaining - $1 
+                     WHERE id = $2::uuid`,
+                    deductionFromThisBatch,
+                    batch.id,
+                  );
+
+                  batch.quantity_units_remaining = batchRemaining - deductionFromThisBatch;
+                  unitsLeftToDeduct -= deductionFromThisBatch;
+
+                  const batchPackPrice = batch.selling_price_pack != null ? Number(batch.selling_price_pack) : defaultPackPrice;
+                  const batchUnitPrice = batch.selling_price_unit != null ? Number(batch.selling_price_unit) : defaultUnitPrice;
+
+                  const allocatedQty = isPack ? Math.round((deductionFromThisBatch / unitsPerPack) * 100) / 100 : deductionFromThisBatch;
+                  const priceApplied = isPack ? batchPackPrice : batchUnitPrice;
+                  const lineTotal = priceApplied * allocatedQty;
+
+                  const costPricePack = Number(batch.purchase_price_pack) || 0;
+                  const costPriceUnit = unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack;
+                  const lineCost = isPack ? costPricePack * allocatedQty : costPriceUnit * allocatedQty;
+
+                  subtotal += lineTotal;
+
+                  lineItemsToInsert.push({
+                    id: crypto.randomUUID(),
+                    saleId,
+                    inventoryItemId: item.inventoryItemId,
+                    inventoryBatchId: batch.id,
+                    unitType: item.unitType,
+                    quantity: allocatedQty,
+                    unitPrice: priceApplied,
+                    totalPrice: lineTotal,
+                    costPricePack,
+                    costPriceUnit,
+                    totalCost: lineCost,
+                  });
+                }
               }
 
               // Strict Pharmaceutical Stock Safety: Reject sales of depleted stock
@@ -364,8 +434,8 @@ export class PosService {
           }
         }
 
-        // Retry on invoice_number collision
-        if ((err.message?.includes('invoice_number') || err.message?.includes('sales_invoice_number_key')) && attempt < 3) {
+        // Retry on invoice_number collision (only when generating random invoice numbers)
+        if ((err.message?.includes('invoice_number') || err.message?.includes('sales_invoice_number_key')) && !dto.offlineInvoiceNumber && attempt < 3) {
           this.logger.warn(`Invoice number collision on attempt ${attempt}. Regenerating number and retrying.`);
           invoiceNumber = this.generateInvoiceNumber();
           saleId = crypto.randomUUID();
@@ -420,6 +490,8 @@ export class PosService {
           items: offlineSale.items,
           discountAmount: Number(offlineSale.discountAmount || 0),
           offlineId: offlineSale.offlineId,
+          offlineInvoiceNumber: offlineSale.offlineInvoiceNumber,
+          allocatedBatches: offlineSale.allocatedBatches,
         };
         const sale = await this.checkout(checkoutDto);
         results.push({
@@ -445,7 +517,8 @@ export class PosService {
 
   /**
    * Process Quick Return (Refund item back to stock or mark as damaged)
-   * Implements Reverse-FEFO & exact batch allocation to prevent inventory corruption.
+   * Implements Reverse-FEFO & exact batch allocation completely inside an ACID Transaction with Row Locks
+   * to eliminate concurrent returns race conditions and stock discrepancy.
    */
   async processReturn(dto: CreateReturnDto) {
     const schemaName = this.tenantContext.getSchemaName();
@@ -453,273 +526,11 @@ export class PosService {
     const ctx = this.tenantContext.getContext();
     const userId = ctx?.userId;
 
+    if (!dto.reason || !dto.reason.trim()) {
+      throw new BadRequestException('سبب الإرجاع مطلوب إلزامياً للتدقيق والرقابة المخزنية');
+    }
+
     await this.ensureReturnColumnsExist(schemaName);
-
-    // 1. Fetch inventory item with medicine details
-    const itemRows: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT ii.id, ii.medicine_id, ii.units_per_pack, ii.selling_price_pack, ii.selling_price_unit,
-              COALESCE(ii.custom_name, m.trade_name, 'دواء') as "tradeName",
-              m.scientific_name as "scientificName"
-       FROM "${schemaName}".inventory_items ii
-       LEFT JOIN public.medicines m ON ii.medicine_id = m.id
-       WHERE ii.id = $1::uuid`,
-      dto.inventoryItemId,
-    );
-
-    if (itemRows.length === 0) {
-      throw new NotFoundException('المادة غير موجودة في المخزون');
-    }
-
-    const invItem = itemRows[0];
-    const isPack = dto.unitType === UnitTypeEnum.PACK;
-    const unitsPerPack = Number(invItem.units_per_pack) || 1;
-    const unitsToReturn = isPack ? dto.quantity * unitsPerPack : dto.quantity;
-
-    const allocations: ReturnAllocation[] = [];
-    let calculatedRefundTotal = 0;
-
-    // SCENARIO 1: Returning against an existing Invoice (saleId provided)
-    if (dto.saleId) {
-      // 1. Fetch all sale items for this invoice and medicine, ordered by expiry date DESC (Reverse FEFO)
-      const saleItems: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT si.id, si.inventory_batch_id, si.unit_type, si.quantity, si.unit_price,
-                si.cost_price_pack, si.cost_price_unit, si.total_cost,
-                COALESCE(b.purchase_price_pack, 0) as batch_purchase_price_pack,
-                b.batch_number, b.expiry_date
-         FROM "${schemaName}".sale_items si
-         LEFT JOIN "${schemaName}".inventory_batches b ON si.inventory_batch_id = b.id
-         WHERE si.sale_id = $1::uuid AND si.inventory_item_id = $2::uuid
-         ORDER BY b.expiry_date DESC NULLS LAST, si.id DESC`,
-        dto.saleId,
-        dto.inventoryItemId,
-      );
-
-      if (saleItems.length === 0) {
-        throw new NotFoundException('المادة المحددة غير مسجلة في الفاتورة الأصلية');
-      }
-
-      // 2. Fetch all prior returns on this invoice for this item
-      const priorReturns: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT inventory_batch_id, unit_type, quantity 
-         FROM "${schemaName}".returns 
-         WHERE sale_id = $1::uuid AND inventory_item_id = $2::uuid`,
-        dto.saleId,
-        dto.inventoryItemId,
-      );
-
-      const previouslyReturnedUnitsByBatch = new Map<string, number>();
-      let unassignedReturnedUnits = 0;
-
-      for (const pr of priorReturns) {
-        const prUnits = pr.unit_type === UnitTypeEnum.PACK
-          ? Number(pr.quantity) * unitsPerPack
-          : Number(pr.quantity);
-
-        if (pr.inventory_batch_id) {
-          const curr = previouslyReturnedUnitsByBatch.get(pr.inventory_batch_id) || 0;
-          previouslyReturnedUnitsByBatch.set(pr.inventory_batch_id, curr + prUnits);
-        } else {
-          unassignedReturnedUnits += prUnits;
-        }
-      }
-
-      // 3. Map batches with their remaining returnable units and snapshotted cost values
-      const soldBatches = saleItems.map((si) => {
-        const soldUnits = si.unit_type === UnitTypeEnum.PACK
-          ? Number(si.quantity) * unitsPerPack
-          : Number(si.quantity);
-        const batchId = si.inventory_batch_id;
-        const alreadyReturned = previouslyReturnedUnitsByBatch.get(batchId) || 0;
-        const costPricePack = Number(si.cost_price_pack) || Number(si.batch_purchase_price_pack) || 0;
-        const costPriceUnit = Number(si.cost_price_unit) || (unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack);
-        return {
-          batchId,
-          batchNumber: si.batch_number,
-          soldUnits,
-          alreadyReturned,
-          unitPrice: Number(si.unit_price),
-          costPricePack,
-          costPriceUnit,
-          isPackSold: si.unit_type === UnitTypeEnum.PACK,
-        };
-      });
-
-      // Distribute any legacy unassigned returns against sold batches
-      if (unassignedReturnedUnits > 0) {
-        for (const sb of soldBatches) {
-          const remaining = sb.soldUnits - sb.alreadyReturned;
-          if (remaining > 0) {
-            const absorb = Math.min(remaining, unassignedReturnedUnits);
-            sb.alreadyReturned += absorb;
-            unassignedReturnedUnits -= absorb;
-            if (unassignedReturnedUnits <= 0) break;
-          }
-        }
-      }
-
-      const totalReturnableUnits = soldBatches.reduce(
-        (acc, b) => acc + Math.max(0, b.soldUnits - b.alreadyReturned),
-        0,
-      );
-
-      if (unitsToReturn > totalReturnableUnits) {
-        const returnablePacks = Math.floor(totalReturnableUnits / unitsPerPack);
-        const returnableRemainder = totalReturnableUnits % unitsPerPack;
-        const availMsg = isPack
-          ? `${returnablePacks} علبة${returnableRemainder > 0 ? ` و ${returnableRemainder} شريط` : ''}`
-          : `${totalReturnableUnits} شريط`;
-        throw new BadRequestException(
-          `الكمية المراد إرجاعها تتجاوز الكمية المتبقية القابلة للإرجاع في الفاتورة الأصلية. الحد الأقصى المتاح للإرجاع: ${availMsg}`,
-        );
-      }
-
-      // 4. If caller explicitly specified a specific batch
-      if (dto.inventoryBatchId) {
-        const targetSoldBatch = soldBatches.find((b) => b.batchId === dto.inventoryBatchId);
-        if (!targetSoldBatch) {
-          throw new BadRequestException('الوجبة المحددة لم يتم بيعها ضمن هذه الفاتورة الأصلية');
-        }
-        const availableInThisBatch = targetSoldBatch.soldUnits - targetSoldBatch.alreadyReturned;
-        if (unitsToReturn > availableInThisBatch) {
-          const batchAvailPacks = Math.floor(availableInThisBatch / unitsPerPack);
-          const batchAvailRem = availableInThisBatch % unitsPerPack;
-          const msg = isPack
-            ? `${batchAvailPacks} علبة${batchAvailRem > 0 ? ` و ${batchAvailRem} شريط` : ''}`
-            : `${availableInThisBatch} شريط`;
-          throw new BadRequestException(
-            `الكمية المراد إرجاعها من الوجبة (${targetSoldBatch.batchNumber}) تتجاوز الكمية المتبقية منها في الفاتورة (${msg})`,
-          );
-        }
-
-        allocations.push({
-          batchId: targetSoldBatch.batchId,
-          batchNumber: targetSoldBatch.batchNumber,
-          units: unitsToReturn,
-          unitPrice: targetSoldBatch.unitPrice,
-          costPricePack: targetSoldBatch.costPricePack,
-          costPriceUnit: targetSoldBatch.costPriceUnit,
-        });
-
-        const unitCost = targetSoldBatch.isPackSold
-          ? targetSoldBatch.unitPrice / unitsPerPack
-          : targetSoldBatch.unitPrice;
-        calculatedRefundTotal = Math.round(unitCost * unitsToReturn);
-      } else {
-        // 5. Automatic distribution via Reverse FEFO
-        // Fresher batches (sold last under FEFO) get returned first, each up to its actual sold limit
-        let remainingToReturn = unitsToReturn;
-        for (const sb of soldBatches) {
-          if (remainingToReturn <= 0) break;
-          const available = sb.soldUnits - sb.alreadyReturned;
-          if (available > 0) {
-            const allocateUnits = Math.min(remainingToReturn, available);
-            allocations.push({
-              batchId: sb.batchId,
-              batchNumber: sb.batchNumber,
-              units: allocateUnits,
-              unitPrice: sb.unitPrice,
-              costPricePack: sb.costPricePack,
-              costPriceUnit: sb.costPriceUnit,
-            });
-
-            const unitCost = sb.isPackSold
-              ? sb.unitPrice / unitsPerPack
-              : sb.unitPrice;
-            calculatedRefundTotal += Math.round(unitCost * allocateUnits);
-            remainingToReturn -= allocateUnits;
-          }
-        }
-      }
-    } else {
-      // SCENARIO 2: Quick Return without invoice (saleId omitted)
-      const defaultPrice = isPack
-        ? Number(invItem.selling_price_pack) || 0
-        : Number(invItem.selling_price_unit) || 0;
-      calculatedRefundTotal = Math.round(defaultPrice * dto.quantity);
-
-      if (dto.inventoryBatchId) {
-        // Pharmacist selected an explicit batch
-        const batchRows: any[] = await this.prisma.$queryRawUnsafe(
-          `SELECT id, batch_number, expiry_date, is_recalled, purchase_price_pack 
-           FROM "${schemaName}".inventory_batches 
-           WHERE id = $1::uuid AND inventory_item_id = $2::uuid`,
-          dto.inventoryBatchId,
-          dto.inventoryItemId,
-        );
-        if (batchRows.length === 0) {
-          throw new NotFoundException('تشغيلة الوجبة المحددة غير موجودة لهذه المادة');
-        }
-        const bCostPack = Number(batchRows[0].purchase_price_pack) || 0;
-        const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
-        allocations.push({
-          batchId: batchRows[0].id,
-          batchNumber: batchRows[0].batch_number || null,
-          units: unitsToReturn,
-          unitPrice: defaultPrice,
-          costPricePack: bCostPack,
-          costPriceUnit: bCostUnit,
-        });
-      } else {
-        // Pick best active non-recalled batch with latest expiry
-        const candidateBatches: any[] = await this.prisma.$queryRawUnsafe(
-          `SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack 
-           FROM "${schemaName}".inventory_batches 
-           WHERE inventory_item_id = $1::uuid 
-             AND expiry_date >= CURRENT_DATE 
-             AND (is_recalled IS FALSE OR is_recalled IS NULL)
-           ORDER BY expiry_date DESC, created_at DESC 
-           LIMIT 1`,
-          dto.inventoryItemId,
-        );
-
-        let targetBatch = candidateBatches[0];
-        if (!targetBatch) {
-          const fallbackBatches: any[] = await this.prisma.$queryRawUnsafe(
-            `SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack 
-             FROM "${schemaName}".inventory_batches 
-             WHERE inventory_item_id = $1::uuid 
-             ORDER BY created_at DESC 
-             LIMIT 1`,
-            dto.inventoryItemId,
-          );
-          targetBatch = fallbackBatches[0];
-        }
-
-        if (!targetBatch) {
-          throw new NotFoundException('لا توجد أي تشغيلة مسجلة لهذه المادة في المخزون');
-        }
-
-        const bCostPack = Number(targetBatch.purchase_price_pack) || 0;
-        const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
-        allocations.push({
-          batchId: targetBatch.id,
-          batchNumber: targetBatch.batch_number || null,
-          units: unitsToReturn,
-          unitPrice: defaultPrice,
-          costPricePack: bCostPack,
-          costPriceUnit: bCostUnit,
-        });
-      }
-    }
-
-    // Strict Refund Amount Validation:
-    let refundAmount = calculatedRefundTotal;
-    if (dto.refundAmount !== undefined && dto.refundAmount !== null) {
-      const requestedRefund = Number(dto.refundAmount);
-      if (isNaN(requestedRefund) || requestedRefund < 0) {
-        throw new BadRequestException('مبلغ الاسترجاع غير صالح');
-      }
-      if (requestedRefund > calculatedRefundTotal) {
-        throw new BadRequestException(
-          `مبلغ الاسترجاع المطلوب (${requestedRefund.toLocaleString()} د.ع) يتجاوز الحد الأقصى المسموح به (${calculatedRefundTotal.toLocaleString()} د.ع) بناءً على سعر البيع الفعلي للوجبات المرجعة`,
-        );
-      }
-      refundAmount = requestedRefund;
-    }
-
-    const returnId = crypto.randomUUID();
-    const condition = dto.itemCondition || ItemConditionEnum.RESALEABLE;
-    const paymentMethod = dto.paymentMethod || 'CASH';
 
     // Get Cashier Name
     let cashierName = 'الكاشير';
@@ -733,64 +544,359 @@ export class PosService {
       }
     }
 
-    // Execute Stock Increment & Return Record Insertion inside an ACID Transaction with Row Locks
-    await this.prisma.$transaction(async (tx) => {
-      // 1. Deterministically sort allocation batch IDs to prevent deadlocks
-      const sortedAllocations = [...allocations].sort((a, b) => a.batchId.localeCompare(b.batchId));
+    const condition = dto.itemCondition || ItemConditionEnum.RESALEABLE;
+    const paymentMethod = dto.paymentMethod || 'CASH';
+    const returnId = crypto.randomUUID();
 
-      // 2. Lock & update each allocated batch (if RESALEABLE)
-      if (condition === ItemConditionEnum.RESALEABLE) {
-        for (const alloc of sortedAllocations) {
-          // Acquire exclusive row lock before incrementing
-          await tx.$queryRawUnsafe(
-            `SELECT id FROM "${schemaName}".inventory_batches WHERE id = $1::uuid FOR UPDATE`,
-            alloc.batchId,
+    // Execute Entire Return Evaluation, Stock Increment & Return Record Insertion inside an ACID Transaction with Row Locks
+    const txResult = await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Fetch & Lock inventory item with medicine details
+        const itemRows: any[] = await tx.$queryRawUnsafe(
+          `SELECT ii.id, ii.medicine_id, ii.units_per_pack, ii.selling_price_pack, ii.selling_price_unit,
+                  COALESCE(ii.custom_name, m.trade_name, 'دواء') as "tradeName",
+                  m.scientific_name as "scientificName"
+           FROM "${schemaName}".inventory_items ii
+           LEFT JOIN public.medicines m ON ii.medicine_id = m.id
+           WHERE ii.id = $1::uuid
+           FOR UPDATE OF ii`,
+          dto.inventoryItemId,
+        );
+
+        if (itemRows.length === 0) {
+          throw new NotFoundException('المادة غير موجودة في المخزون');
+        }
+
+        const invItem = itemRows[0];
+        const isPack = dto.unitType === UnitTypeEnum.PACK;
+        const unitsPerPack = Number(invItem.units_per_pack) || 1;
+        const unitsToReturn = isPack ? dto.quantity * unitsPerPack : dto.quantity;
+
+        const allocations: ReturnAllocation[] = [];
+        let calculatedRefundTotal = 0;
+
+        // SCENARIO 1: Returning against an existing Invoice (saleId provided)
+        if (dto.saleId) {
+          // A. Lock sale row
+          const saleRows: any[] = await tx.$queryRawUnsafe(
+            `SELECT id, invoice_number, total_amount FROM "${schemaName}".sales WHERE id = $1::uuid FOR UPDATE`,
+            dto.saleId,
           );
+          if (saleRows.length === 0) {
+            throw new NotFoundException('الفاتورة الأصلية غير موجودة');
+          }
+
+          // B. Fetch all sale items for this invoice and medicine with row locks
+          const saleItems: any[] = await tx.$queryRawUnsafe(
+            `SELECT si.id, si.inventory_batch_id, si.unit_type, si.quantity, si.unit_price,
+                    si.cost_price_pack, si.cost_price_unit, si.total_cost,
+                    COALESCE(b.purchase_price_pack, 0) as batch_purchase_price_pack,
+                    b.batch_number, b.expiry_date
+             FROM "${schemaName}".sale_items si
+             LEFT JOIN "${schemaName}".inventory_batches b ON si.inventory_batch_id = b.id
+             WHERE si.sale_id = $1::uuid AND si.inventory_item_id = $2::uuid
+             ORDER BY b.expiry_date DESC NULLS LAST, si.id DESC
+             FOR UPDATE OF si`,
+            dto.saleId,
+            dto.inventoryItemId,
+          );
+
+          if (saleItems.length === 0) {
+            throw new NotFoundException('المادة المحددة غير مسجلة في الفاتورة الأصلية');
+          }
+
+          // C. Fetch all prior returns on this invoice for this item with row locks inside transaction
+          const priorReturns: any[] = await tx.$queryRawUnsafe(
+            `SELECT inventory_batch_id, unit_type, quantity 
+             FROM "${schemaName}".returns 
+             WHERE sale_id = $1::uuid AND inventory_item_id = $2::uuid
+             FOR UPDATE`,
+            dto.saleId,
+            dto.inventoryItemId,
+          );
+
+          const previouslyReturnedUnitsByBatch = new Map<string, number>();
+          let unassignedReturnedUnits = 0;
+
+          for (const pr of priorReturns) {
+            const prUnits = pr.unit_type === UnitTypeEnum.PACK
+              ? Number(pr.quantity) * unitsPerPack
+              : Number(pr.quantity);
+
+            if (pr.inventory_batch_id) {
+              const curr = previouslyReturnedUnitsByBatch.get(pr.inventory_batch_id) || 0;
+              previouslyReturnedUnitsByBatch.set(pr.inventory_batch_id, curr + prUnits);
+            } else {
+              unassignedReturnedUnits += prUnits;
+            }
+          }
+
+          // D. Map batches with their remaining returnable units and snapshotted cost values
+          const soldBatches = saleItems.map((si) => {
+            const soldUnits = si.unit_type === UnitTypeEnum.PACK
+              ? Number(si.quantity) * unitsPerPack
+              : Number(si.quantity);
+            const batchId = si.inventory_batch_id;
+            const alreadyReturned = previouslyReturnedUnitsByBatch.get(batchId) || 0;
+            const costPricePack = Number(si.cost_price_pack) || Number(si.batch_purchase_price_pack) || 0;
+            const costPriceUnit = Number(si.cost_price_unit) || (unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack);
+            return {
+              batchId,
+              batchNumber: si.batch_number,
+              soldUnits,
+              alreadyReturned,
+              unitPrice: Number(si.unit_price),
+              costPricePack,
+              costPriceUnit,
+              isPackSold: si.unit_type === UnitTypeEnum.PACK,
+            };
+          });
+
+          // Distribute any legacy unassigned returns against sold batches
+          if (unassignedReturnedUnits > 0) {
+            for (const sb of soldBatches) {
+              const remaining = sb.soldUnits - sb.alreadyReturned;
+              if (remaining > 0) {
+                const absorb = Math.min(remaining, unassignedReturnedUnits);
+                sb.alreadyReturned += absorb;
+                unassignedReturnedUnits -= absorb;
+                if (unassignedReturnedUnits <= 0) break;
+              }
+            }
+          }
+
+          const totalReturnableUnits = soldBatches.reduce(
+            (acc, b) => acc + Math.max(0, b.soldUnits - b.alreadyReturned),
+            0,
+          );
+
+          if (unitsToReturn > totalReturnableUnits) {
+            const returnablePacks = Math.floor(totalReturnableUnits / unitsPerPack);
+            const returnableRemainder = totalReturnableUnits % unitsPerPack;
+            const availMsg = isPack
+              ? `${returnablePacks} علبة${returnableRemainder > 0 ? ` و ${returnableRemainder} شريط` : ''}`
+              : `${totalReturnableUnits} شريط`;
+            throw new BadRequestException(
+              `الكمية المراد إرجاعها تتجاوز الكمية المتبقية القابلة للإرجاع في الفاتورة الأصلية. الحد الأقصى المتاح للإرجاع: ${availMsg}`,
+            );
+          }
+
+          // E. If caller explicitly specified a specific batch
+          if (dto.inventoryBatchId) {
+            const targetSoldBatch = soldBatches.find((b) => b.batchId === dto.inventoryBatchId);
+            if (!targetSoldBatch) {
+              throw new BadRequestException('الوجبة المحددة لم يتم بيعها ضمن هذه الفاتورة الأصلية');
+            }
+            const availableInThisBatch = targetSoldBatch.soldUnits - targetSoldBatch.alreadyReturned;
+            if (unitsToReturn > availableInThisBatch) {
+              const batchAvailPacks = Math.floor(availableInThisBatch / unitsPerPack);
+              const batchAvailRem = availableInThisBatch % unitsPerPack;
+              const msg = isPack
+                ? `${batchAvailPacks} علبة${batchAvailRem > 0 ? ` و ${batchAvailRem} شريط` : ''}`
+                : `${availableInThisBatch} شريط`;
+              throw new BadRequestException(
+                `الكمية المراد إرجاعها من الوجبة (${targetSoldBatch.batchNumber}) تتجاوز الكمية المتبقية منها في الفاتورة (${msg})`,
+              );
+            }
+
+            allocations.push({
+              batchId: targetSoldBatch.batchId,
+              batchNumber: targetSoldBatch.batchNumber,
+              units: unitsToReturn,
+              unitPrice: targetSoldBatch.unitPrice,
+              costPricePack: targetSoldBatch.costPricePack,
+              costPriceUnit: targetSoldBatch.costPriceUnit,
+            });
+
+            const unitCost = targetSoldBatch.isPackSold
+              ? targetSoldBatch.unitPrice / unitsPerPack
+              : targetSoldBatch.unitPrice;
+            calculatedRefundTotal = Math.round(unitCost * unitsToReturn);
+          } else {
+            // Automatic distribution via Reverse FEFO inside transaction
+            let remainingToReturn = unitsToReturn;
+            for (const sb of soldBatches) {
+              if (remainingToReturn <= 0) break;
+              const available = sb.soldUnits - sb.alreadyReturned;
+              if (available > 0) {
+                const allocateUnits = Math.min(remainingToReturn, available);
+                allocations.push({
+                  batchId: sb.batchId,
+                  batchNumber: sb.batchNumber,
+                  units: allocateUnits,
+                  unitPrice: sb.unitPrice,
+                  costPricePack: sb.costPricePack,
+                  costPriceUnit: sb.costPriceUnit,
+                });
+
+                const unitCost = sb.isPackSold
+                  ? sb.unitPrice / unitsPerPack
+                  : sb.unitPrice;
+                calculatedRefundTotal += Math.round(unitCost * allocateUnits);
+                remainingToReturn -= allocateUnits;
+              }
+            }
+          }
+        } else {
+          // SCENARIO 2: Quick Return without invoice (saleId omitted)
+          const defaultPrice = isPack
+            ? Number(invItem.selling_price_pack) || 0
+            : Number(invItem.selling_price_unit) || 0;
+          calculatedRefundTotal = Math.round(defaultPrice * dto.quantity);
+
+          if (dto.inventoryBatchId) {
+            const batchRows: any[] = await tx.$queryRawUnsafe(
+              `SELECT id, batch_number, expiry_date, is_recalled, purchase_price_pack 
+               FROM "${schemaName}".inventory_batches 
+               WHERE id = $1::uuid AND inventory_item_id = $2::uuid
+               FOR UPDATE`,
+              dto.inventoryBatchId,
+              dto.inventoryItemId,
+            );
+            if (batchRows.length === 0) {
+              throw new NotFoundException('تشغيلة الوجبة المحددة غير موجودة لهذه المادة');
+            }
+            const bCostPack = Number(batchRows[0].purchase_price_pack) || 0;
+            const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
+            allocations.push({
+              batchId: batchRows[0].id,
+              batchNumber: batchRows[0].batch_number || null,
+              units: unitsToReturn,
+              unitPrice: defaultPrice,
+              costPricePack: bCostPack,
+              costPriceUnit: bCostUnit,
+            });
+          } else {
+            // Pick best active non-recalled batch with latest expiry
+            const candidateBatches: any[] = await tx.$queryRawUnsafe(
+              `SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack 
+               FROM "${schemaName}".inventory_batches 
+               WHERE inventory_item_id = $1::uuid 
+                 AND expiry_date >= CURRENT_DATE 
+                 AND (is_recalled IS FALSE OR is_recalled IS NULL)
+               ORDER BY expiry_date DESC, created_at DESC 
+               LIMIT 1
+               FOR UPDATE`,
+              dto.inventoryItemId,
+            );
+
+            let targetBatch = candidateBatches[0];
+            if (!targetBatch) {
+              const fallbackBatches: any[] = await tx.$queryRawUnsafe(
+                `SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack 
+                 FROM "${schemaName}".inventory_batches 
+                 WHERE inventory_item_id = $1::uuid 
+                 ORDER BY created_at DESC 
+                 LIMIT 1
+                 FOR UPDATE`,
+                dto.inventoryItemId,
+              );
+              targetBatch = fallbackBatches[0];
+            }
+
+            if (!targetBatch) {
+              throw new NotFoundException('لا توجد أي تشغيلة مسجلة لهذه المادة في المخزون');
+            }
+
+            const bCostPack = Number(targetBatch.purchase_price_pack) || 0;
+            const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
+            allocations.push({
+              batchId: targetBatch.id,
+              batchNumber: targetBatch.batch_number || null,
+              units: unitsToReturn,
+              unitPrice: defaultPrice,
+              costPricePack: bCostPack,
+              costPriceUnit: bCostUnit,
+            });
+          }
+        }
+
+        // Validate Refund Amount
+        let refundAmount = calculatedRefundTotal;
+        if (dto.refundAmount !== undefined && dto.refundAmount !== null) {
+          const requestedRefund = Number(dto.refundAmount);
+          if (isNaN(requestedRefund) || requestedRefund < 0) {
+            throw new BadRequestException('مبلغ الاسترجاع غير صالح');
+          }
+          if (requestedRefund > calculatedRefundTotal) {
+            throw new BadRequestException(
+              `مبلغ الاسترجاع المطلوب (${requestedRefund.toLocaleString()} د.ع) يتجاوز الحد الأقصى المسموح به (${calculatedRefundTotal.toLocaleString()} د.ع) بناءً على سعر البيع الفعلي للوجبات المرجعة`,
+            );
+          }
+          refundAmount = requestedRefund;
+        }
+
+        // Sort batch IDs deterministically
+        const sortedAllocations = [...allocations].sort((a, b) => a.batchId.localeCompare(b.batchId));
+
+        // Lock & update each allocated batch (if RESALEABLE)
+        if (condition === ItemConditionEnum.RESALEABLE) {
+          for (const alloc of sortedAllocations) {
+            await tx.$queryRawUnsafe(
+              `SELECT id FROM "${schemaName}".inventory_batches WHERE id = $1::uuid FOR UPDATE`,
+              alloc.batchId,
+            );
+
+            await tx.$executeRawUnsafe(
+              `UPDATE "${schemaName}".inventory_batches 
+               SET quantity_units_remaining = quantity_units_remaining + $1 
+               WHERE id = $2::uuid`,
+              alloc.units,
+              alloc.batchId,
+            );
+          }
+        }
+
+        // Insert return records
+        for (let i = 0; i < allocations.length; i++) {
+          const alloc = allocations[i];
+          const lineReturnId = i === 0 ? returnId : crypto.randomUUID();
+          const allocRefund = allocations.length === 1
+            ? refundAmount
+            : Math.round((alloc.units / unitsToReturn) * refundAmount);
+          const allocQty = isPack ? alloc.units / unitsPerPack : alloc.units;
+          const allocUnitCost = isPack ? (alloc.costPricePack || 0) : (alloc.costPriceUnit || 0);
+          const allocTotalCost = Math.round(allocUnitCost * allocQty);
 
           await tx.$executeRawUnsafe(
-            `UPDATE "${schemaName}".inventory_batches 
-             SET quantity_units_remaining = quantity_units_remaining + $1 
-             WHERE id = $2::uuid`,
-            alloc.units,
+            `INSERT INTO "${schemaName}".returns 
+             (id, sale_id, inventory_item_id, inventory_batch_id, user_id, unit_type, quantity, refund_amount, unit_cost, total_cost, reason, item_condition, payment_method, user_name, notes, trade_name, created_at)
+             VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
+            lineReturnId,
+            dto.saleId || null,
+            dto.inventoryItemId,
             alloc.batchId,
+            userId || null,
+            dto.unitType,
+            allocQty,
+            allocRefund,
+            allocUnitCost,
+            allocTotalCost,
+            dto.reason.trim(),
+            condition,
+            paymentMethod,
+            cashierName,
+            dto.notes || null,
+            invItem.tradeName,
           );
         }
-      }
 
-      // 3. Insert return records with exact batch foreign key
-      for (let i = 0; i < allocations.length; i++) {
-        const alloc = allocations[i];
-        const lineReturnId = i === 0 ? returnId : crypto.randomUUID();
-        const allocRefund = allocations.length === 1
-          ? refundAmount
-          : Math.round((alloc.units / unitsToReturn) * refundAmount);
-        const allocQty = isPack ? alloc.units / unitsPerPack : alloc.units;
-        const allocUnitCost = isPack ? (alloc.costPricePack || 0) : (alloc.costPriceUnit || 0);
-        const allocTotalCost = Math.round(allocUnitCost * allocQty);
+        return {
+          invItem,
+          allocations,
+          refundAmount,
+          unitsPerPack,
+          isPack,
+        };
+      },
+      {
+        isolationLevel: 'ReadCommitted' as any,
+        maxWait: 10000,
+        timeout: 30000,
+      },
+    );
 
-        await tx.$executeRawUnsafe(
-          `INSERT INTO "${schemaName}".returns 
-           (id, sale_id, inventory_item_id, inventory_batch_id, user_id, unit_type, quantity, refund_amount, unit_cost, total_cost, reason, item_condition, payment_method, user_name, notes, trade_name, created_at)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())`,
-          lineReturnId,
-          dto.saleId || null,
-          dto.inventoryItemId,
-          alloc.batchId,
-          userId || null,
-          dto.unitType,
-          allocQty,
-          allocRefund,
-          allocUnitCost,
-          allocTotalCost,
-          dto.reason || 'إرجاع سريع',
-          condition,
-          paymentMethod,
-          cashierName,
-          dto.notes || null,
-          invItem.tradeName,
-        );
-      }
-    });
+    const { invItem, allocations, refundAmount, unitsPerPack, isPack } = txResult;
 
     if (condition === ItemConditionEnum.RESALEABLE) {
       this.eventEmitter.emit('inventory.synced', {
@@ -800,7 +906,7 @@ export class PosService {
       });
     } else {
       this.logger.log(
-        `Returned item ${invItem.tradeName} marked as DAMAGED. Units (${unitsToReturn}) quarantined and excluded from active sale stock.`,
+        `Returned item ${invItem.tradeName} marked as DAMAGED. Units quarantined and excluded from active sale stock.`,
       );
     }
 
@@ -818,7 +924,7 @@ export class PosService {
       unitType: dto.unitType,
       itemCondition: condition,
       paymentMethod,
-      reason: dto.reason || 'إرجاع سريع',
+      reason: dto.reason.trim(),
       createdAt: new Date().toISOString(),
       cashierName,
       allocations,

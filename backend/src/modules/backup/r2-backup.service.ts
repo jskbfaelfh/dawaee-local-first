@@ -267,26 +267,49 @@ export class R2BackupService {
         }
       }
 
-      // 4. Update lastBackupAt in Tenant Master Table
-      await this.prisma.tenant.update({
-        where: { id: tenant.id },
-        data: {
-          lastBackupAt: new Date(),
-          backupStatus: "SUCCESS",
-        },
-      });
+      // 4. Update lastBackupAt in Tenant Master Table ONLY if actual cloud upload succeeded
+      if (uploadedToMaster || uploadedToPharmacyR2) {
+        await this.prisma.tenant.update({
+          where: { id: tenant.id },
+          data: {
+            lastBackupAt: new Date(),
+            backupStatus: "SUCCESS",
+          },
+        });
 
-      this.logger.log(`✅ Successfully backed up tenant: ${tenant.name} (${sizeKb} KB)`);
-      return {
-        tenantId: tenant.id,
-        name: tenant.name,
-        slug: tenant.slug,
-        status: "SUCCESS",
-        sizeKb,
-        uploadedToMaster,
-        uploadedToPharmacyR2,
-        manifest: rawData.manifest,
-      };
+        this.logger.log(`✅ Successfully backed up tenant: ${tenant.name} (${sizeKb} KB)`);
+        return {
+          tenantId: tenant.id,
+          name: tenant.name,
+          slug: tenant.slug,
+          status: "SUCCESS",
+          sizeKb,
+          uploadedToMaster,
+          uploadedToPharmacyR2,
+          manifest: rawData.manifest,
+        };
+      } else {
+        const errorMsg = 'لم يتم رفع النسخة الاحتياطية إلى أي وجهة سحابية (Master R2 أو Pharmacy R2 غير مهيأة أو فشل الاتصال)';
+        this.logger.warn(`⚠️ Backup for ${tenant.name} completed locally (${sizeKb} KB) but was NOT uploaded to any R2 destination.`);
+        await this.prisma.tenant.update({
+          where: { id: tenant.id },
+          data: {
+            backupStatus: "FAILED",
+          },
+        }).catch(() => {});
+
+        return {
+          tenantId: tenant.id,
+          name: tenant.name,
+          slug: tenant.slug,
+          status: "FAILED",
+          sizeKb,
+          uploadedToMaster: false,
+          uploadedToPharmacyR2: false,
+          error: errorMsg,
+          manifest: rawData.manifest,
+        };
+      }
     } catch (err: any) {
       this.logger.error(`❌ Error backing up tenant ${tenant.name}: ${err.message}`);
       await this.prisma.tenant.update({

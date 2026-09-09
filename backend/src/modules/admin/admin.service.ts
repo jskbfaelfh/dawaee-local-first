@@ -179,7 +179,7 @@ export class AdminService {
     // Pre-validate all tenants exist before touching the database
     const existingTenants = await this.prisma.tenant.findMany({
       where: { id: { in: allTenantIds } },
-      select: { id: true, name: true, phone: true, chainId: true },
+      select: { id: true, name: true, phone: true, chainId: true, schemaName: true },
     });
 
     if (existingTenants.length !== allTenantIds.length) {
@@ -221,6 +221,33 @@ export class AdminService {
 
       return newChain;
     });
+
+    // 3. Synchronize HQ Owner accounts into all merged branch schemas to ensure unified switchBranch() access
+    try {
+      const hqOwners: any[] = await this.prisma.$queryRawUnsafe(`
+        SELECT id, name, username, password_hash, role, is_active
+        FROM "${hqTenant.schemaName}".users
+        WHERE role = 'OWNER';
+      `);
+
+      for (const branchId of branchIds) {
+        const branchTenant = existingTenants.find((t) => t.id === branchId);
+        if (!branchTenant || !branchTenant.schemaName) continue;
+
+        for (const owner of hqOwners) {
+          // Upsert HQ owner into branch schema
+          await this.prisma.$executeRawUnsafe(`
+            INSERT INTO "${branchTenant.schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+              role = 'OWNER',
+              is_active = TRUE;
+          `, owner.id, owner.name, owner.username, owner.password_hash, owner.role, owner.is_active ?? true);
+        }
+      }
+    } catch (syncErr: any) {
+      this.logger.warn(`Could not sync HQ owners to branch schemas: ${syncErr.message}`);
+    }
 
     return {
       success: true,

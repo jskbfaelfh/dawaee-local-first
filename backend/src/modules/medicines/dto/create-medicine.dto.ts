@@ -42,6 +42,10 @@ export class QueryMedicineDto {
 
   @IsString()
   @IsOptional()
+  search?: string; // Alias for q
+
+  @IsString()
+  @IsOptional()
   barcode?: string;
 
   @IsInt()

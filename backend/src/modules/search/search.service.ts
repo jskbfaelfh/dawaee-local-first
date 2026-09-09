@@ -34,7 +34,7 @@ export class SearchService {
 
     const term = (q || '').trim();
     const hasCoordinates = userLat !== undefined && userLng !== undefined;
-    const is24h = only24Hours === true || only24Hours === 'true';
+    const is24h = Boolean(only24Hours);
 
     if (!term && !governorate && !district && !hasCoordinates && !is24h) {
       return {
@@ -62,7 +62,7 @@ export class SearchService {
       where.district = { contains: district.trim(), mode: 'insensitive' };
     }
 
-    if (only24Hours === true || only24Hours === 'true') {
+    if (is24h) {
       where.is24Hours = true;
     }
 

@@ -1,13 +1,16 @@
 import {
   IsArray,
   IsEnum,
-  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   IsUUID,
   Min,
+  Max,
+  MaxLength,
+  ArrayMaxSize,
+  ArrayMinSize,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -29,13 +32,43 @@ export class CartItemDto {
   @IsEnum(UnitTypeEnum, { message: 'نوع الوحدة يجب أن يكون PACK أو STRIP' })
   unitType: UnitTypeEnum;
 
-  @IsInt()
-  @Min(1, { message: 'الكمية يجب أن تكون 1 على الأقل' })
+  @IsNumber({}, { message: 'الكمية يجب أن تكون رقماً صالحاً' })
+  @Min(0.01, { message: 'الكمية يجب أن تكون أكبر من صفر' })
+  @Max(10000, { message: 'الكمية لا يمكن أن تتجاوز 10,000 في العملية الواحدة' })
   quantity: number;
+}
+
+export class OfflineBatchAllocationDto {
+  @IsUUID('all')
+  inventoryItemId: string;
+
+  @IsUUID('all')
+  @IsOptional()
+  batchId?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  batchNumber?: string;
+
+  @IsNumber()
+  @Min(0.01)
+  units: number;
+
+  @IsNumber()
+  @Min(0)
+  unitPrice: number;
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  costPricePack?: number;
 }
 
 export class CheckoutDto {
   @IsArray()
+  @ArrayMinSize(1, { message: 'يجب تضمين مادة واحدة على الأقل في الفاتورة' })
+  @ArrayMaxSize(500, { message: 'عدد المواد في الفاتورة لا يمكن أن يتجاوز 500 مادة' })
   @ValidateNested({ each: true })
   @Type(() => CartItemDto)
   items: CartItemDto[];
@@ -47,7 +80,19 @@ export class CheckoutDto {
 
   @IsString()
   @IsOptional()
+  @MaxLength(100)
   offlineId?: string; // معرف البيعة المحلي للأوفلاين لمنع تكرار الإرسال والخصم
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  offlineInvoiceNumber?: string; // رقم الفاتورة المحلي المطبوع للمريض للاعتماد السحابي الموحد
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => OfflineBatchAllocationDto)
+  allocatedBatches?: OfflineBatchAllocationDto[];
 }
 
 export enum ItemConditionEnum {
@@ -71,8 +116,9 @@ export class CreateReturnDto {
   @IsEnum(UnitTypeEnum)
   unitType: UnitTypeEnum;
 
-  @IsInt()
-  @Min(1)
+  @IsNumber()
+  @Min(0.01)
+  @Max(10000)
   quantity: number;
 
   @IsNumber()
@@ -81,8 +127,9 @@ export class CreateReturnDto {
   refundAmount?: number; // المبلغ المرجع (إذا تُرك فارغاً يُحسب تلقائياً)
 
   @IsString()
-  @IsOptional()
-  reason?: string;
+  @IsNotEmpty({ message: 'سبب الإرجاع مطلوب إلزامياً للتدقيق والرقابة المخزنية' })
+  @MaxLength(255, { message: 'سبب الإرجاع يجب ألا يتجاوز 255 حرفاً' })
+  reason: string;
 
   @IsEnum(ItemConditionEnum)
   @IsOptional()
@@ -90,26 +137,38 @@ export class CreateReturnDto {
 
   @IsString()
   @IsOptional()
+  @MaxLength(50)
   paymentMethod?: string = 'CASH';
 
   @IsString()
   @IsOptional()
+  @MaxLength(500)
   notes?: string;
 }
 
 export class OfflineSaleItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   offlineId: string;
 
   @IsString()
   @IsOptional()
+  @MaxLength(100)
   offlineInvoiceNumber?: string;
 
   @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => CartItemDto)
   items: CartItemDto[];
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => OfflineBatchAllocationDto)
+  allocatedBatches?: OfflineBatchAllocationDto[];
 
   @IsNumber()
   @IsOptional()
@@ -118,11 +177,14 @@ export class OfflineSaleItemDto {
 
   @IsString()
   @IsOptional()
+  @MaxLength(50)
   createdAt?: string;
 }
 
 export class SyncOfflineSalesDto {
   @IsArray()
+  @ArrayMinSize(1, { message: 'يجب إرسال فاتورة واحدة على الأقل للمزامنة' })
+  @ArrayMaxSize(1000, { message: 'الحد الأقصى لحزمة المزامنة الواحدة هو 1000 فاتورة' })
   @ValidateNested({ each: true })
   @Type(() => OfflineSaleItemDto)
   sales: OfflineSaleItemDto[];

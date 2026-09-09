@@ -134,6 +134,7 @@ export class InventoryService {
         ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS custom_name VARCHAR(255);
         ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS is_public_visible BOOLEAN DEFAULT TRUE;
         ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS shelf_location VARCHAR(100);
+        CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_inv_med_unique" ON "${schemaName}".inventory_items (medicine_id);
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS supplier_id UUID;
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS purchase_id UUID;
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_recalled BOOLEAN DEFAULT FALSE;

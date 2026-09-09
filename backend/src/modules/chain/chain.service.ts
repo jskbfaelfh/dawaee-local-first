@@ -67,7 +67,7 @@ export class ChainService {
         const todaySalesRow: any[] = await this.prisma.$queryRawUnsafe(`
           SELECT COALESCE(SUM(total_amount), 0)::numeric as "todaySales"
           FROM "${t.schemaName}".sales
-          WHERE DATE(sale_date) = CURRENT_DATE;
+          WHERE DATE(created_at) = CURRENT_DATE;
         `);
         todaySales = Number(todaySalesRow[0]?.todaySales || 0);
 
@@ -75,7 +75,7 @@ export class ChainService {
         const monthSalesRow: any[] = await this.prisma.$queryRawUnsafe(`
           SELECT COALESCE(SUM(total_amount), 0)::numeric as "monthSales"
           FROM "${t.schemaName}".sales
-          WHERE sale_date >= DATE_TRUNC('month', CURRENT_DATE);
+          WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE);
         `);
         monthSales = Number(monthSalesRow[0]?.monthSales || 0);
 
@@ -83,7 +83,7 @@ export class ChainService {
         const invRow: any[] = await this.prisma.$queryRawUnsafe(`
           SELECT 
             COUNT(DISTINCT i.id)::int as "totalItems",
-            COALESCE(SUM(b.quantity_units_remaining * (COALESCE(b.purchase_price_pack, 0) / GREATEST(1, COALESCE(b.units_per_pack, 1)))), 0)::numeric as "totalValue"
+            COALESCE(SUM(b.quantity_units_remaining * (COALESCE(b.purchase_price_pack, 0) / GREATEST(1, COALESCE(i.units_per_pack, 1)))), 0)::numeric as "totalValue"
           FROM "${t.schemaName}".inventory_items i
           LEFT JOIN "${t.schemaName}".inventory_batches b ON i.id = b.inventory_item_id AND b.quantity_units_remaining > 0;
         `);
@@ -100,7 +100,7 @@ export class ChainService {
           );
         `);
         outOfStockCount = Number(oosRow[0]?.oos || 0);
-      } catch (err) {
+      } catch (err: any) {
         this.logger.warn(`Could not compute metrics for branch schema ${t.schemaName}: ${err.message}`);
       }
 

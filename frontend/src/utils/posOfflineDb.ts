@@ -6,6 +6,15 @@
 const DB_NAME = 'dawaee_pos_offline_db';
 const DB_VERSION = 1;
 
+export interface OfflineSaleBatchAllocation {
+  inventoryItemId: string;
+  batchId?: string;
+  batchNumber?: string;
+  units: number;
+  unitPrice: number;
+  costPricePack?: number;
+}
+
 export interface OfflineSaleRecord {
   offlineId: string;
   invoiceNumber: string;
@@ -17,6 +26,7 @@ export interface OfflineSaleRecord {
       unitType: string;
       quantity: number;
     }[];
+    allocatedBatches?: OfflineSaleBatchAllocation[];
   };
   displayItems: any[];
   subtotal: number;
@@ -120,7 +130,8 @@ export async function searchLocalInventory(searchTerm: string): Promise<any[]> {
 }
 
 /**
- * Deduct stock locally in IndexedDB when an offline sale occurs
+ * Deduct stock locally in IndexedDB when an offline sale occurs.
+ * Strictly prevents overselling: throws an error if requested quantity exceeds local stock.
  */
 export async function deductLocalInventoryStock(cartItems: any[]): Promise<void> {
   const db = await getPosOfflineDb();
@@ -136,8 +147,15 @@ export async function deductLocalInventoryStock(cartItems: any[]): Promise<void>
           const isPack = cartItem.unitType === 'PACK';
           const unitsPerPack = Number(item.unitsPerPack) || 1;
           const unitsToDeduct = isPack ? cartItem.quantity * unitsPerPack : cartItem.quantity;
+          const currentTotal = Number(item.totalUnitsRemaining) || 0;
 
-          item.totalUnitsRemaining = Math.max(0, (item.totalUnitsRemaining || 0) - unitsToDeduct);
+          if (unitsToDeduct > currentTotal) {
+            tx.abort();
+            reject(new Error(`الكمية المطلوبة من دواء (${item.tradeName}) تتجاوز الرصيد المحلي المتاح (${currentTotal} وحدة).`));
+            return;
+          }
+
+          item.totalUnitsRemaining = currentTotal - unitsToDeduct;
           item.availablePacks = Math.floor(item.totalUnitsRemaining / unitsPerPack);
           item.availableStrips = item.totalUnitsRemaining % unitsPerPack;
 

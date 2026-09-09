@@ -8,6 +8,7 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
+import { PrismaService } from '../../database/prisma.service';
 import { isOriginAllowed } from '../../common/utils/security.util';
 
 @WebSocketGateway({
@@ -31,7 +32,10 @@ export class PharmacyEventsGateway
   @WebSocketServer()
   server: Server;
 
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   async handleConnection(client: Socket) {
     try {
@@ -76,6 +80,31 @@ export class PharmacyEventsGateway
       if (!decoded || !decoded.tenantId) {
         client.disconnect(true);
         return;
+      }
+
+      // Live Database Validation: Ensure tenant is active and not suspended
+      const tenant = await this.prisma.tenant.findUnique({
+        where: { id: decoded.tenantId },
+        select: { id: true, schemaName: true, subscriptionStatus: true },
+      });
+
+      if (!tenant || tenant.subscriptionStatus === 'SUSPENDED') {
+        this.logger.warn(`Rejected WebSocket for suspended/non-existent tenant: ${decoded.tenantId}`);
+        client.disconnect(true);
+        return;
+      }
+
+      // Live Database Validation: Ensure user is active in the tenant schema
+      if (decoded.sub && tenant.schemaName) {
+        const userRows: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id, is_active as "isActive" FROM "${tenant.schemaName}".users WHERE id = $1::uuid LIMIT 1`,
+          decoded.sub,
+        );
+        if (userRows.length === 0 || userRows[0].isActive === false) {
+          this.logger.warn(`Rejected WebSocket for deactivated/non-existent user: ${decoded.sub}`);
+          client.disconnect(true);
+          return;
+        }
       }
 
       const roomName = `tenant_${decoded.tenantId}`;

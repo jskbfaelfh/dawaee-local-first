@@ -328,6 +328,7 @@ export const PosView: React.FC = () => {
           offlineId: s.offlineId,
           offlineInvoiceNumber: s.invoiceNumber,
           items: s.payload.items,
+          allocatedBatches: s.payload.allocatedBatches,
           discountAmount: s.payload.discountAmount,
           createdAt: s.createdAt,
         })),
@@ -653,10 +654,41 @@ export const PosView: React.FC = () => {
         batchNumber: it.batchNumber,
       }));
 
+      // Build explicit batch allocations from cart breakdown
+      const allocatedBatches: any[] = [];
+      for (const it of cart) {
+        const isPack = it.unitType === 'PACK';
+        const unitsPerPk = Number(it.unitsPerPack) || 1;
+        if (it.breakdown && it.breakdown.length > 0 && it.activeBatches) {
+          for (const bPortion of it.breakdown) {
+            const bObj = it.activeBatches.find((b) => b.batchNumber === bPortion.batchNumber);
+            allocatedBatches.push({
+              inventoryItemId: it.inventoryItemId,
+              batchId: bObj?.id || it.inventoryBatchId,
+              batchNumber: bPortion.batchNumber,
+              units: isPack ? bPortion.qty * unitsPerPk : bPortion.qty,
+              unitPrice: bPortion.unitPrice,
+              costPricePack: bObj?.purchasePricePack || 0,
+            });
+          }
+        } else if (it.inventoryBatchId || it.batchNumber) {
+          allocatedBatches.push({
+            inventoryItemId: it.inventoryItemId,
+            batchId: it.inventoryBatchId,
+            batchNumber: it.batchNumber,
+            units: isPack ? it.quantity * unitsPerPk : it.quantity,
+            unitPrice: it.unitPrice,
+          });
+        }
+      }
+
       const offlineRecord: OfflineSaleRecord = {
         offlineId,
         invoiceNumber: offlineInvoiceNum,
-        payload,
+        payload: {
+          ...payload,
+          allocatedBatches,
+        },
         displayItems,
         subtotal,
         discountAmount,

@@ -164,8 +164,8 @@ export class StocktakeService {
           sub."barcode",
           sub."shelfLocation",
           sub."unitsPerPack",
-          ROUND(sub."weightedAvgCostPack"),
-          ROUND(sub."sellingPricePack"),
+          ROUND(sub."weightedAvgCostPack", 2),
+          ROUND(sub."sellingPricePack", 2),
           sub."systemUnits",
           FLOOR(sub."systemUnits" / sub."unitsPerPack")::int,
           (sub."systemUnits" % sub."unitsPerPack")::int,
@@ -567,123 +567,130 @@ export class StocktakeService {
     const tenantId = this.tenantContext.getTenantId();
     await this.ensureStocktakeTablesExist(schemaName);
 
-    // 5.1 Check Session
-    const sessions: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT * FROM "${schemaName}".stocktake_sessions WHERE id = $1::uuid LIMIT 1`,
-      sessionId,
-    );
-    if (sessions.length === 0) {
-      throw new NotFoundException('جلسة الجرد غير موجودة');
-    }
-    const session = sessions[0];
-    if (session.status === StocktakeStatus.COMPLETED) {
-      throw new BadRequestException('تمت تسوية واعتماد هذه الجلسة مسبقاً.');
-    }
-
-    // 5.2 Fetch all counted items that have discrepancies (variance != 0)
-    const discrepancyItems: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT * FROM "${schemaName}".stocktake_items 
-       WHERE session_id = $1::uuid AND variance_status IN ('SHORTAGE', 'SURPLUS')`,
-      sessionId,
-    );
-
     const affectedMedicineIds: string[] = [];
 
-    // 5.3 Apply Reconciliations into Batches atomically inside transaction
-    await this.prisma.$transaction(async (tx) => {
-      for (const item of discrepancyItems) {
-        const inventoryItemId = item.inventory_item_id;
-        const medicineId = item.medicine_id;
-        if (medicineId) affectedMedicineIds.push(medicineId);
+    // 5.1 Apply Reconciliations into Batches atomically inside transaction with row locks on session
+    const adjustedCount = await this.prisma.$transaction(
+      async (tx) => {
+        // A. Lock and verify session inside transaction
+        const sessionRows: any[] = await tx.$queryRawUnsafe(
+          `SELECT * FROM "${schemaName}".stocktake_sessions WHERE id = $1::uuid FOR UPDATE`,
+          sessionId,
+        );
+        if (sessionRows.length === 0) {
+          throw new NotFoundException('جلسة الجرد غير موجودة');
+        }
+        const session = sessionRows[0];
+        if (session.status === StocktakeStatus.COMPLETED) {
+          throw new BadRequestException('تمت تسوية واعتماد هذه الجلسة مسبقاً.');
+        }
 
-        const varianceUnits = Number(item.variance_units) || 0;
+        // B. Fetch counted items with discrepancies inside transaction
+        const discrepancyItems: any[] = await tx.$queryRawUnsafe(
+          `SELECT * FROM "${schemaName}".stocktake_items 
+           WHERE session_id = $1::uuid AND variance_status IN ('SHORTAGE', 'SURPLUS')`,
+          sessionId,
+        );
 
-        if (varianceUnits < 0) {
-          // Deficit / Shortage: We need to deduct |varianceUnits| from batches
-          let neededDeduction = Math.abs(varianceUnits);
+        for (const item of discrepancyItems) {
+          const inventoryItemId = item.inventory_item_id;
+          const medicineId = item.medicine_id;
+          if (medicineId) affectedMedicineIds.push(medicineId);
 
-          // Fetch active batches sorted by FEFO (oldest expiry first) with row locks
-          const batches: any[] = await tx.$queryRawUnsafe(
-            `SELECT id, quantity_units_remaining
-             FROM "${schemaName}".inventory_batches
-             WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
-             ORDER BY expiry_date ASC, created_at ASC
-             FOR UPDATE`,
-            inventoryItemId,
-          );
+          const varianceUnits = Number(item.variance_units) || 0;
 
-          for (const b of batches) {
-            if (neededDeduction <= 0) break;
-            const currentRemaining = Number(b.quantity_units_remaining) || 0;
-            const deductFromThisBatch = Math.min(currentRemaining, neededDeduction);
+          if (varianceUnits < 0) {
+            // Deficit / Shortage: We need to deduct |varianceUnits| from batches
+            let neededDeduction = Math.abs(varianceUnits);
 
-            await tx.$executeRawUnsafe(
-              `UPDATE "${schemaName}".inventory_batches
-               SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
-               WHERE id = $2::uuid`,
-              deductFromThisBatch,
-              b.id,
-            );
-
-            neededDeduction -= deductFromThisBatch;
-          }
-        } else if (varianceUnits > 0) {
-          // Surplus: We need to add varianceUnits to stock
-          const existingBatches: any[] = await tx.$queryRawUnsafe(
-            `SELECT id, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date
-             FROM "${schemaName}".inventory_batches
-             WHERE inventory_item_id = $1::uuid
-             ORDER BY created_at DESC LIMIT 1
-             FOR UPDATE`,
-            inventoryItemId,
-          );
-
-          if (existingBatches.length > 0) {
-            // Add to latest batch
-            await tx.$executeRawUnsafe(
-              `UPDATE "${schemaName}".inventory_batches
-               SET quantity_units_remaining = quantity_units_remaining + $1
-               WHERE id = $2::uuid`,
-              varianceUnits,
-              existingBatches[0].id,
-            );
-          } else {
-            // Create an adjustment batch
-            const newBatchId = crypto.randomUUID();
-            const nextYear = new Date().getFullYear() + 2;
-            await tx.$executeRawUnsafe(
-              `INSERT INTO "${schemaName}".inventory_batches
-               (id, inventory_item_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
-               VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::date, FALSE, FALSE, NOW())`,
-              newBatchId,
+            // Fetch active batches sorted by FEFO (oldest expiry first) with row locks
+            const batches: any[] = await tx.$queryRawUnsafe(
+              `SELECT id, quantity_units_remaining
+               FROM "${schemaName}".inventory_batches
+               WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
+               ORDER BY expiry_date ASC, created_at ASC
+               FOR UPDATE`,
               inventoryItemId,
-              null, // Strictly null: no fabricated batch numbers
-              item.purchase_price_pack || 0,
-              item.selling_price_pack || 0,
-              item.units_per_pack > 1 ? Math.round(item.selling_price_pack / item.units_per_pack) : item.selling_price_pack,
-              varianceUnits,
-              `${nextYear}-12-01`,
             );
+
+            for (const b of batches) {
+              if (neededDeduction <= 0) break;
+              const currentRemaining = Number(b.quantity_units_remaining) || 0;
+              const deductFromThisBatch = Math.min(currentRemaining, neededDeduction);
+
+              await tx.$executeRawUnsafe(
+                `UPDATE "${schemaName}".inventory_batches
+                 SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
+                 WHERE id = $2::uuid`,
+                deductFromThisBatch,
+                b.id,
+              );
+
+              neededDeduction -= deductFromThisBatch;
+            }
+          } else if (varianceUnits > 0) {
+            // Surplus: Restrict to active, non-expired, non-recalled batches
+            const candidateBatches: any[] = await tx.$queryRawUnsafe(
+              `SELECT id, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date
+               FROM "${schemaName}".inventory_batches
+               WHERE inventory_item_id = $1::uuid
+                 AND expiry_date >= CURRENT_DATE
+                 AND (is_recalled IS FALSE OR is_recalled IS NULL)
+               ORDER BY expiry_date DESC, created_at DESC 
+               LIMIT 1
+               FOR UPDATE`,
+              inventoryItemId,
+            );
+
+            if (candidateBatches.length > 0) {
+              await tx.$executeRawUnsafe(
+                `UPDATE "${schemaName}".inventory_batches
+                 SET quantity_units_remaining = quantity_units_remaining + $1
+                 WHERE id = $2::uuid`,
+                varianceUnits,
+                candidateBatches[0].id,
+              );
+            } else {
+              // Create an adjustment batch
+              const newBatchId = crypto.randomUUID();
+              const nextYear = new Date().getFullYear() + 2;
+              await tx.$executeRawUnsafe(
+                `INSERT INTO "${schemaName}".inventory_batches
+                 (id, inventory_item_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+                 VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::date, FALSE, FALSE, NOW())`,
+                newBatchId,
+                inventoryItemId,
+                null, // Strictly null: no fabricated batch numbers
+                item.purchase_price_pack || 0,
+                item.selling_price_pack || 0,
+                item.units_per_pack > 1 ? Math.round(item.selling_price_pack / item.units_per_pack) : item.selling_price_pack,
+                varianceUnits,
+                `${nextYear}-12-01`,
+              );
+            }
           }
         }
-      }
 
-      // 5.4 Mark Session as COMPLETED
-      await tx.$executeRawUnsafe(
-        `UPDATE "${schemaName}".stocktake_sessions
-         SET status = 'COMPLETED',
-             reconciled_by_user_id = $1::uuid,
-             reconciled_by_name = $2,
-             reconciled_at = NOW(),
-             notes = COALESCE($3, notes),
-             updated_at = NOW()
-         WHERE id = $4::uuid`,
-        user?.id || null,
-        user?.name || 'مدير الصيدلية',
-        dto.notes || null,
-        sessionId,
-      );
-    }, { timeout: 60000, maxWait: 15000 });
+        // C. Mark Session as COMPLETED
+        await tx.$executeRawUnsafe(
+          `UPDATE "${schemaName}".stocktake_sessions
+           SET status = 'COMPLETED',
+               reconciled_by_user_id = $1::uuid,
+               reconciled_by_name = $2,
+               reconciled_at = NOW(),
+               notes = COALESCE($3, notes),
+               updated_at = NOW()
+           WHERE id = $4::uuid`,
+          user?.id || null,
+          user?.name || 'مدير الصيدلية',
+          dto.notes || null,
+          sessionId,
+        );
+
+        return discrepancyItems.length;
+      },
+      { timeout: 60000, maxWait: 15000 },
+    );
 
     // 5.5 Emit Live Inventory Sync Event to update all POS clients & inventory views
     this.eventEmitter.emit('inventory.synced', {
@@ -694,8 +701,8 @@ export class StocktakeService {
 
     return {
       success: true,
-      message: `تم اعتماد محضر الجرد وتسوية المخزن بنجاح! تم تعديل أرصدة (${discrepancyItems.length}) مادة في المخزن.`,
-      adjustedItemsCount: discrepancyItems.length,
+      message: `تم اعتماد محضر الجرد وتسوية المخزن بنجاح! تم تعديل أرصدة (${adjustedCount}) مادة في المخزن.`,
+      adjustedItemsCount: adjustedCount,
     };
   }
 

@@ -10,6 +10,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -18,7 +19,7 @@ import { CreateMedicineDto, QueryMedicineDto } from './dto/create-medicine.dto';
 import { AiSmartSearchDto } from './dto/ai-smart-search.dto';
 
 @Controller('medicines')
-@UseGuards(AuthGuard('jwt'), RolesGuard)
+@UseGuards(AuthGuard('jwt'), SubscriptionGuard, RolesGuard)
 export class MedicinesController {
   constructor(private readonly medicinesService: MedicinesService) {}
 

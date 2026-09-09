@@ -17,13 +17,13 @@ export class MedicinesService {
    * Search medicines in Global Catalog by tradeName, scientificName, or barcode
    */
   async search(query: QueryMedicineDto) {
-    const { q, barcode, limit = 30 } = query;
+    const { q, search, barcode, limit = 30 } = query;
     const where: any = {};
 
+    const searchTerm = (q || search || '').trim();
     if (barcode) {
       where.barcode = barcode;
-    } else if (q && q.trim().length > 0) {
-      const searchTerm = q.trim();
+    } else if (searchTerm.length > 0) {
       where.OR = [
         { tradeName: { contains: searchTerm, mode: 'insensitive' } },
         { scientificName: { contains: searchTerm, mode: 'insensitive' } },

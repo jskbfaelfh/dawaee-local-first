@@ -246,7 +246,7 @@ export class ProvisioningService {
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )`,
-      `CREATE INDEX IF NOT EXISTS "idx_${schemaName}_inv_med" ON "${schemaName}".inventory_items (medicine_id)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_inv_med" ON "${schemaName}".inventory_items (medicine_id)`,
       `CREATE TABLE IF NOT EXISTS "${schemaName}".inventory_batches (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         inventory_item_id UUID REFERENCES "${schemaName}".inventory_items(id) ON DELETE CASCADE,
