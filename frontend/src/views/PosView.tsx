@@ -446,6 +446,18 @@ export const PosView: React.FC = () => {
       med.sellingPriceUnit = unitPrice;
     }
 
+    const unitsPerPk = Number(med.unitsPerPack) || 1;
+    const isPack = unitType === 'PACK';
+    const totalAvailUnits = specificBatch
+      ? Number(specificBatch.quantityUnitsRemaining || 0)
+      : (med.activeBatches?.reduce((sum, b) => sum + Math.max(0, Number(b.quantityUnitsRemaining || 0)), 0) ?? Number(med.totalUnitsRemaining || 0));
+
+    // Strict Pharmaceutical Stock Safety: Block adding 0-stock medicine
+    if (totalAvailUnits <= 0) {
+      alert(`عذراً، دواء (${med.tradeName}) غير متوفر في المخزون حالياً (الرصيد: 0). يرجى إدخال وتثبيت فاتورة شراء للمادة أولاً لتسجيل الوجبات وتحديث الرصيد.`);
+      return;
+    }
+
     const batchId = specificBatch?.id;
     const batchNumber = specificBatch?.batchNumber;
 
@@ -457,6 +469,13 @@ export const PosView: React.FC = () => {
       if (existingIndex > -1) {
         const current = prev[existingIndex];
         const newQty = current.quantity + 1;
+        const unitsNeeded = isPack ? newQty * unitsPerPk : newQty;
+
+        if (totalAvailUnits > 0 && unitsNeeded > totalAvailUnits) {
+          alert(`عذراً، الكمية المطلوبة تتجاوز الرصيد المتوفر في المخزن لدواء (${med.tradeName}). المتوفر: ${med.availablePacks || Math.floor(totalAvailUnits / unitsPerPk)} علبة (${totalAvailUnits} وحدة).`);
+          return prev;
+        }
+
         const { totalPrice, effectiveUnitPrice, breakdown } = calculateDynamicItemTotals(
           current.activeBatches,
           current.defaultSellingPricePack,
@@ -523,6 +542,17 @@ export const PosView: React.FC = () => {
 
       if (newQty <= 0) {
         return prev.filter((_, i) => i !== index);
+      }
+
+      if (delta > 0) {
+        const isPack = item.unitType === 'PACK';
+        const unitsPerPk = Number(item.unitsPerPack) || 1;
+        const totalUnitsAvail = item.activeBatches?.reduce((sum, b) => sum + Math.max(0, Number(b.quantityUnitsRemaining || 0)), 0) ?? 0;
+        const unitsNeeded = isPack ? newQty * unitsPerPk : newQty;
+        if (totalUnitsAvail > 0 && unitsNeeded > totalUnitsAvail) {
+          alert(`الكمية المطلوبة تتجاوز الرصيد المتوفر في المخزن (${totalUnitsAvail} وحدة).`);
+          return prev;
+        }
       }
 
       const { totalPrice, effectiveUnitPrice, breakdown } = calculateDynamicItemTotals(
@@ -594,6 +624,14 @@ export const PosView: React.FC = () => {
         searchInputRef.current?.focus();
         return;
       } catch (err: any) {
+        // If it's a business/client rejection (400 Bad Request out of stock, 403, 404), do NOT fallback to offline. Alert user!
+        if (err?.status && err.status >= 400 && err.status < 500) {
+          setMessage({ type: 'error', text: err.message || 'فشلت عملية البيع' });
+          alert(err.message || 'فشلت عملية البيع: يرجى التحقق من توفر المخزون وصحة البيانات');
+          setLoading(false);
+          return;
+        }
+
         console.warn('Server checkout failed or connection lost, switching to Offline Mode', err);
         setIsOnline(false);
       }

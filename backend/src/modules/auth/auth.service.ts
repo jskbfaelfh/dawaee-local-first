@@ -231,7 +231,7 @@ export class AuthService {
       }));
     }
 
-    // For non-master users, filter branches where the user actually has an active account
+    // For non-master users, filter branches where the user actually has an active account with matching user.id
     const authorizedBranches: any[] = [];
     for (const t of memberTenants) {
       if (t.id === currentTenant.id) {
@@ -250,10 +250,9 @@ export class AuthService {
       try {
         const matchingUsers: any[] = await this.prisma.$queryRawUnsafe(
           `SELECT id, role, is_active FROM "${t.schemaName}".users 
-           WHERE (id = $1::uuid OR username = $2) AND is_active = TRUE
+           WHERE id = $1::uuid AND is_active = TRUE
            LIMIT 1;`,
           user.id,
-          user.username,
         );
         if (matchingUsers.length > 0) {
           authorizedBranches.push({
@@ -311,7 +310,7 @@ export class AuthService {
       throw new ForbiddenException('الفرع المطلوب ليس مسجلاً ضمن سلسلة فروعك');
     }
 
-    // Fetch the actual current user (User A) from current tenant schema
+    // Fetch the authentic current user (User A) from current tenant schema
     const currentDbUsers: any[] = await this.prisma.$queryRawUnsafe(
       `SELECT id, name, username, password_hash, role, is_active 
        FROM "${currentTenant.schemaName}".users 
@@ -335,107 +334,88 @@ export class AuthService {
       userA,
     );
 
-    let targetUser: { id: string; name: string; username: string; role: string };
+    let effectiveRole = userA.role;
 
     if (isMaster) {
-      // 1. Chain Master Owner: Authorized across all branches in the chain
-      // Maintain user's exact identity in target schema
-      const targetUsersById: any[] = await this.prisma.$queryRawUnsafe(
+      // 1. Chain Master Owner (HQ):
+      // The Master Owner has chain-wide authorization across all branches.
+      // We ensure the exact user identity (userA.id, userA.name, userA.username) exists in target schema.
+      effectiveRole = 'OWNER';
+
+      const existingById: any[] = await this.prisma.$queryRawUnsafe(
         `SELECT id, name, username, role, is_active 
          FROM "${targetTenant.schemaName}".users 
          WHERE id = $1::uuid LIMIT 1;`,
         userA.id,
       );
 
-      if (targetUsersById.length > 0) {
-        await this.prisma.$executeRawUnsafe(
-          `UPDATE "${targetTenant.schemaName}".users 
-           SET name = $1, role = 'OWNER', is_active = TRUE 
-           WHERE id = $2::uuid;`,
-          userA.name,
+      if (existingById.length > 0) {
+        // Resolve any username collision with another local row
+        const conflictRow: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id FROM "${targetTenant.schemaName}".users 
+           WHERE LOWER(username) = LOWER($1) AND id != $2::uuid LIMIT 1;`,
+          userA.username,
           userA.id,
         );
-        targetUser = {
-          id: userA.id,
-          name: userA.name,
-          username: targetUsersById[0].username,
-          role: 'OWNER',
-        };
+        if (conflictRow.length > 0) {
+          const safeAlt = `${userA.username}_local_${conflictRow[0].id.slice(0, 4)}`;
+          await this.prisma.$executeRawUnsafe(
+            `UPDATE "${targetTenant.schemaName}".users SET username = $1 WHERE id = $2::uuid;`,
+            safeAlt,
+            conflictRow[0].id,
+          );
+        }
+
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE "${targetTenant.schemaName}".users 
+           SET name = $1, username = $2, password_hash = $3, role = 'OWNER', is_active = TRUE 
+           WHERE id = $4::uuid;`,
+          userA.name,
+          userA.username,
+          userA.password_hash,
+          userA.id,
+        );
       } else {
-        const targetUsersByUsername: any[] = await this.prisma.$queryRawUnsafe(
-          `SELECT id, name, username, role, is_active 
-           FROM "${targetTenant.schemaName}".users 
-           WHERE username = $1 LIMIT 1;`,
+        // Check if another row has the same username
+        const conflictRow: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id FROM "${targetTenant.schemaName}".users 
+           WHERE LOWER(username) = LOWER($1) LIMIT 1;`,
           userA.username,
         );
-
-        if (targetUsersByUsername.length > 0) {
-          if (targetUsersByUsername[0].role === 'OWNER') {
-            await this.prisma.$executeRawUnsafe(
-              `UPDATE "${targetTenant.schemaName}".users 
-               SET name = $1, role = 'OWNER', is_active = TRUE 
-               WHERE id = $2::uuid;`,
-              userA.name,
-              targetUsersByUsername[0].id,
-            );
-            targetUser = {
-              id: targetUsersByUsername[0].id,
-              name: userA.name,
-              username: targetUsersByUsername[0].username,
-              role: 'OWNER',
-            };
-          } else {
-            const distinctUsername = `${userA.username}_chain`;
-            await this.prisma.$executeRawUnsafe(
-              `INSERT INTO "${targetTenant.schemaName}".users 
-               (id, name, username, password_hash, role, is_active, created_at)
-               VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
-              userA.id,
-              userA.name,
-              distinctUsername,
-              userA.password_hash,
-            );
-            targetUser = {
-              id: userA.id,
-              name: userA.name,
-              username: distinctUsername,
-              role: 'OWNER',
-            };
-          }
-        } else {
-          // Provision Chain Master Owner into the branch schema
+        if (conflictRow.length > 0) {
+          const safeAlt = `${userA.username}_local_${conflictRow[0].id.slice(0, 4)}`;
           await this.prisma.$executeRawUnsafe(
-            `INSERT INTO "${targetTenant.schemaName}".users 
-             (id, name, username, password_hash, role, is_active, created_at)
-             VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
-            userA.id,
-            userA.name,
-            userA.username,
-            userA.password_hash,
+            `UPDATE "${targetTenant.schemaName}".users SET username = $1 WHERE id = $2::uuid;`,
+            safeAlt,
+            conflictRow[0].id,
           );
-          targetUser = {
-            id: userA.id,
-            name: userA.name,
-            username: userA.username,
-            role: 'OWNER',
-          };
         }
+
+        // Insert userA with their authentic ID and credentials
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO "${targetTenant.schemaName}".users 
+           (id, name, username, password_hash, role, is_active, created_at)
+           VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
+          userA.id,
+          userA.name,
+          userA.username,
+          userA.password_hash,
+        );
       }
     } else {
-      // 2. Non-Master User (Local branch user / manager):
-      // STRICT AUTHORIZATION: Must already exist and be active in target schema!
+      // 2. Non-Master User (Local staff / branch cashier / manager):
+      // STRICT CHAIN MEMBERSHIP: Must already have an active account in target schema with their authentic userA.id!
       const targetExisting: any[] = await this.prisma.$queryRawUnsafe(
         `SELECT id, name, username, role, is_active 
          FROM "${targetTenant.schemaName}".users 
-         WHERE (id = $1::uuid OR username = $2)
+         WHERE id = $1::uuid
          LIMIT 1;`,
         userA.id,
-        userA.username,
       );
 
       if (targetExisting.length === 0) {
         this.logger.warn(
-          `Security Alert: Unauthorized branch switch attempt by user "${userA.username}" from "${currentTenant.name}" to "${targetTenant.name}" (not assigned to target branch)`,
+          `Security Alert: Unauthorized branch switch attempt by user "${userA.username}" (${userA.id}) from "${currentTenant.name}" to "${targetTenant.name}" (not a chain owner and not assigned to target branch)`,
         );
         throw new ForbiddenException(
           'ليس لديك صلاحية الوصول إلى هذا الفرع. التبديل متاح فقط لمالك السلسلة (HQ) أو المستخدمين المصرح لهم في هذا الفرع',
@@ -446,12 +426,7 @@ export class AuthService {
         throw new ForbiddenException('حسابك في هذا الفرع معطل، يرجى التواصل مع إدارة الصيدلية');
       }
 
-      targetUser = {
-        id: targetExisting[0].id,
-        name: targetExisting[0].name,
-        username: targetExisting[0].username,
-        role: targetExisting[0].role,
-      };
+      effectiveRole = targetExisting[0].role;
     }
 
     // Check target subscription status
@@ -464,6 +439,14 @@ export class AuthService {
         data: { subscriptionStatus: 'EXPIRED' },
       });
     }
+
+    // Target user identity is ALWAYS userA (The authentic authenticated human user!)
+    const targetUser = {
+      id: userA.id,
+      name: userA.name,
+      username: userA.username,
+      role: effectiveRole,
+    };
 
     // Generate new JWT retaining authentic user identity and role
     const payload = {
@@ -486,7 +469,7 @@ export class AuthService {
     );
 
     this.logger.log(
-      `Branch switched: User "${targetUser.name}" (${targetUser.username}, role: ${targetUser.role}) switched from branch "${currentTenant.name}" to "${targetTenant.name}"`,
+      `Branch switched: Authentic User "${targetUser.name}" (ID: ${targetUser.id}, username: ${targetUser.username}, role: ${targetUser.role}) switched context from "${currentTenant.name}" to "${targetTenant.name}"`,
     );
 
     return {

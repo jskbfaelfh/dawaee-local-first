@@ -73,7 +73,11 @@ export async function apiRequest<T>(
     const errorMsg =
       data?.message ||
       (Array.isArray(data?.message) ? data.message.join(', ') : 'حدث خطأ في الاتصال بالسيرفر');
-    throw new Error(errorMsg);
+    const err: any = new Error(errorMsg);
+    err.status = response.status;
+    err.statusCode = response.status;
+    err.data = data;
+    throw err;
   }
 
   return data as T;
