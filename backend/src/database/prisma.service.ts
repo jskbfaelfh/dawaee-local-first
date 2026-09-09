@@ -17,11 +17,19 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleInit() {
-    try {
-      await this.$connect();
-      this.logger.log('Connected to PostgreSQL database successfully.');
-    } catch (error) {
-      this.logger.error('Failed to connect to database', error);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        await this.$connect();
+        this.logger.log('Connected to PostgreSQL database successfully.');
+        return;
+      } catch (error) {
+        if (attempt < 4) {
+          this.logger.warn(`Database connection attempt ${attempt} failed. Retrying in 2s (waking Neon compute)...`);
+          await new Promise((r) => setTimeout(r, 2000));
+        } else {
+          this.logger.error('Failed to connect to database after retries', error);
+        }
+      }
     }
   }
 

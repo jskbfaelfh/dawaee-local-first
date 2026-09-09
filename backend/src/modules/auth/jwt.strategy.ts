@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ForbiddenException, Logger } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
@@ -61,6 +61,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         name: true,
         schemaName: true,
         subscriptionStatus: true,
+        subscriptionEndsAt: true,
       },
     });
 
@@ -68,8 +69,24 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('الصيدلية غير مسجلة أو تم حذفها من النظام');
     }
 
-    if (tenant.subscriptionStatus !== 'ACTIVE') {
-      throw new UnauthorizedException('اشتراك الصيدلية منتهي أو معلق، يرجى مراجعة إدارة دوائي');
+    // 1. Block suspended pharmacies completely
+    if (tenant.subscriptionStatus === 'SUSPENDED') {
+      throw new ForbiddenException('تم إيقاف حساب هذه الصيدلية مؤقتاً، يرجى مراجعة إدارة النظام');
+    }
+
+    // 2. Auto-sync expired status if end date has elapsed
+    let effectiveSubscriptionStatus = tenant.subscriptionStatus;
+    const now = new Date();
+    if (
+      tenant.subscriptionEndsAt &&
+      tenant.subscriptionEndsAt < now &&
+      tenant.subscriptionStatus === 'ACTIVE'
+    ) {
+      effectiveSubscriptionStatus = 'EXPIRED';
+      await this.prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { subscriptionStatus: 'EXPIRED' },
+      });
     }
 
     // 3. User account active verification inside isolated tenant schema
@@ -89,13 +106,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         throw new UnauthorizedException('تم تعطيل هذا الحساب، يرجى مراجعة إدارة الصيدلية');
       }
 
-      // Sync role and schema from DB to prevent token privilege tampering
+      // Sync role and schema from DB to prevent token privilege tampering, and attach effective subscription status
       return {
         ...payload,
         name: dbUser.name,
         role: dbUser.role,
         schemaName: tenant.schemaName,
-        subscriptionStatus: tenant.subscriptionStatus,
+        subscriptionStatus: effectiveSubscriptionStatus,
       };
     } catch (err: any) {
       if (err instanceof UnauthorizedException) {

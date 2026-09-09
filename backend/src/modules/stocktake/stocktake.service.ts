@@ -110,7 +110,8 @@ export class StocktakeService {
 
   /**
    * 1. Create a new Stocktake Session (Annual, Semi-Annual, or Sectional)
-   * Automatically snapshots all current inventory items and theoretical quantities.
+   * Automatically and atomically snapshots all current inventory items, theoretical quantities,
+   * and calculates true Weighted Average Cost (WAC) based on active batch quantities.
    */
   async createSession(dto: CreateStocktakeSessionDto, user: any) {
     const schemaName = this.tenantContext.getSchemaName();
@@ -120,98 +121,121 @@ export class StocktakeService {
     const type = dto.type || StocktakeType.ANNUAL;
     const shelfFilter = dto.shelfFilter?.trim() || null;
 
-    // 1.1 Insert Session
-    await this.prisma.$executeRawUnsafe(
-      `INSERT INTO "${schemaName}".stocktake_sessions
-       (id, title, type, status, shelf_filter, notes, created_by_user_id, created_by_name, created_at, updated_at)
-       VALUES ($1::uuid, $2, $3, 'IN_PROGRESS', $4, $5, $6::uuid, $7, NOW(), NOW())`,
-      sessionId,
-      dto.title.trim(),
-      type,
-      shelfFilter,
-      dto.notes || null,
-      user?.id || null,
-      user?.name || 'مدير الصيدلية',
-    );
-
-    // 1.2 Snapshot current inventory items & batches
-    const params: any[] = [];
     let shelfCondition = '';
+    const sqlParams: any[] = [sessionId];
     if (shelfFilter) {
-      params.push(shelfFilter);
-      shelfCondition = `WHERE ii.shelf_location = $1`;
+      sqlParams.push(shelfFilter);
+      shelfCondition = `WHERE ii.shelf_location = $2`;
     }
 
-    const inventoryItemsSql = `
-      SELECT 
-        ii.id as "inventoryItemId",
-        ii.medicine_id as "medicineId",
-        COALESCE(ii.custom_name, m.trade_name) as "tradeName",
-        m.scientific_name as "scientificName",
-        m.dosage_form as "dosageForm",
-        m.strength,
-        m.barcode,
-        ii.shelf_location as "shelfLocation",
-        GREATEST(ii.units_per_pack, 1)::int as "unitsPerPack",
-        COALESCE(ii.selling_price_pack, 0)::numeric as "sellingPricePack",
-        COALESCE(AVG(b.purchase_price_pack), 0)::numeric as "avgCostPack",
-        COALESCE(SUM(b.quantity_units_remaining), 0)::int as "systemUnits"
-      FROM "${schemaName}".inventory_items ii
-      JOIN public.medicines m ON ii.medicine_id = m.id
-      LEFT JOIN "${schemaName}".inventory_batches b ON ii.id = b.inventory_item_id AND b.quantity_units_remaining > 0
-      ${shelfCondition}
-      GROUP BY ii.id, m.id
-      ORDER BY COALESCE(ii.custom_name, m.trade_name) ASC;
-    `;
+    try {
+      // 1.1 Insert Session record
+      await this.prisma.$executeRawUnsafe(
+        `INSERT INTO "${schemaName}".stocktake_sessions
+         (id, title, type, status, shelf_filter, notes, created_by_user_id, created_by_name, created_at, updated_at)
+         VALUES ($1::uuid, $2, $3, 'IN_PROGRESS', $4, $5, $6::uuid, $7, NOW(), NOW())`,
+        sessionId,
+        dto.title.trim(),
+        type,
+        shelfFilter,
+        dto.notes || null,
+        user?.id || null,
+        user?.name || 'مدير الصيدلية',
+      );
 
-    const snapshotItems: any[] = await this.prisma.$queryRawUnsafe(inventoryItemsSql, ...params);
+      // 1.2 High-Performance Atomic Snapshot with Weighted Average Cost (WAC)
+      // Solves Point 10 (Transaction atomicity) and Point 11 (Weighted Moving Average Cost)
+      const insertSql = `
+        INSERT INTO "${schemaName}".stocktake_items (
+          id, session_id, inventory_item_id, medicine_id, trade_name, scientific_name,
+          dosage_form, strength, barcode, shelf_location, units_per_pack,
+          purchase_price_pack, selling_price_pack, system_units, system_packs,
+          system_loose, variance_status, created_at, updated_at
+        )
+        SELECT 
+          gen_random_uuid(),
+          $1::uuid,
+          sub."inventoryItemId",
+          sub."medicineId",
+          sub."tradeName",
+          sub."scientificName",
+          sub."dosageForm",
+          sub."strength",
+          sub."barcode",
+          sub."shelfLocation",
+          sub."unitsPerPack",
+          ROUND(sub."weightedAvgCostPack"),
+          ROUND(sub."sellingPricePack"),
+          sub."systemUnits",
+          FLOOR(sub."systemUnits" / sub."unitsPerPack")::int,
+          (sub."systemUnits" % sub."unitsPerPack")::int,
+          'UNCOUNTED',
+          NOW(),
+          NOW()
+        FROM (
+          SELECT 
+            ii.id as "inventoryItemId",
+            ii.medicine_id as "medicineId",
+            COALESCE(ii.custom_name, m.trade_name) as "tradeName",
+            m.scientific_name as "scientificName",
+            m.dosage_form as "dosageForm",
+            m.strength,
+            m.barcode,
+            ii.shelf_location as "shelfLocation",
+            GREATEST(ii.units_per_pack, 1)::int as "unitsPerPack",
+            COALESCE(ii.selling_price_pack, 0)::numeric as "sellingPricePack",
+            COALESCE(
+              CASE 
+                WHEN SUM(b.quantity_units_remaining) > 0 
+                THEN SUM(b.purchase_price_pack * b.quantity_units_remaining) / SUM(b.quantity_units_remaining)
+                ELSE AVG(b.purchase_price_pack)
+              END,
+              ii.selling_price_pack,
+              0
+            )::numeric as "weightedAvgCostPack",
+            COALESCE(SUM(b.quantity_units_remaining), 0)::int as "systemUnits"
+          FROM "${schemaName}".inventory_items ii
+          JOIN public.medicines m ON ii.medicine_id = m.id
+          LEFT JOIN "${schemaName}".inventory_batches b ON ii.id = b.inventory_item_id AND b.quantity_units_remaining > 0
+          ${shelfCondition}
+          GROUP BY ii.id, m.id
+          ORDER BY COALESCE(ii.custom_name, m.trade_name) ASC
+        ) sub;
+      `;
 
-    // 1.3 Batch insert snapshot into stocktake_items
-    for (const it of snapshotItems) {
-      const unitsPerPack = Number(it.unitsPerPack) || 1;
-      const systemUnits = Number(it.systemUnits) || 0;
-      const systemPacks = Math.floor(systemUnits / unitsPerPack);
-      const systemLoose = systemUnits % unitsPerPack;
-      const purchasePrice = Math.round(Number(it.avgCostPack) || 0);
-      const sellingPrice = Math.round(Number(it.sellingPricePack) || 0);
+      await this.prisma.$executeRawUnsafe(insertSql, ...sqlParams);
+
+      // 1.3 Count snapshot items and update session totals
+      const countRes: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT COUNT(*)::int as total FROM "${schemaName}".stocktake_items WHERE session_id = $1::uuid;`,
+        sessionId,
+      );
+      const totalItems = Number(countRes[0]?.total || 0);
 
       await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}".stocktake_items
-         (id, session_id, inventory_item_id, medicine_id, trade_name, scientific_name, dosage_form, strength, barcode, shelf_location, units_per_pack, purchase_price_pack, selling_price_pack, system_units, system_packs, system_loose, variance_status, created_at, updated_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'UNCOUNTED', NOW(), NOW())`,
-        crypto.randomUUID(),
+        `UPDATE "${schemaName}".stocktake_sessions
+         SET total_system_items = $1
+         WHERE id = $2::uuid`,
+        totalItems,
         sessionId,
-        it.inventoryItemId,
-        it.medicineId,
-        it.tradeName,
-        it.scientificName,
-        it.dosageForm,
-        it.strength,
-        it.barcode,
-        it.shelfLocation,
-        unitsPerPack,
-        purchasePrice,
-        sellingPrice,
-        systemUnits,
-        systemPacks,
-        systemLoose,
       );
+
+      return {
+        success: true,
+        sessionId,
+        totalItems,
+        message: `تم إنشاء جلسة الجرد بنجاح وإدراج (${totalItems}) مادة للبدء بالعد الفعلي.`,
+      };
+    } catch (err: any) {
+      this.logger.error(`Stocktake session creation failed on schema ${schemaName}: ${err.message}`);
+      try {
+        await this.prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}".stocktake_items WHERE session_id = $1::uuid;`, sessionId);
+        await this.prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}".stocktake_sessions WHERE id = $1::uuid;`, sessionId);
+      } catch (rbErr: any) {
+        this.logger.error(`Failed to rollback orphaned stocktake session: ${rbErr.message}`);
+      }
+      throw err;
     }
-
-    // Update total items count in session
-    await this.prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}".stocktake_sessions
-       SET total_system_items = $1
-       WHERE id = $2::uuid`,
-      snapshotItems.length,
-      sessionId,
-    );
-
-    return {
-      success: true,
-      sessionId,
-      message: `تم إنشاء جلسة الجرد بنجاح وإدراج (${snapshotItems.length}) مادة للبدء بالعد الفعلي.`,
-    };
   }
 
   /**
@@ -565,98 +589,101 @@ export class StocktakeService {
 
     const affectedMedicineIds: string[] = [];
 
-    // 5.3 Apply Reconciliations into Batches
-    for (const item of discrepancyItems) {
-      const inventoryItemId = item.inventory_item_id;
-      const medicineId = item.medicine_id;
-      if (medicineId) affectedMedicineIds.push(medicineId);
+    // 5.3 Apply Reconciliations into Batches atomically inside transaction
+    await this.prisma.$transaction(async (tx) => {
+      for (const item of discrepancyItems) {
+        const inventoryItemId = item.inventory_item_id;
+        const medicineId = item.medicine_id;
+        if (medicineId) affectedMedicineIds.push(medicineId);
 
-      const varianceUnits = Number(item.variance_units) || 0;
+        const varianceUnits = Number(item.variance_units) || 0;
 
-      if (varianceUnits < 0) {
-        // Deficit / Shortage: We need to deduct |varianceUnits| from batches
-        let neededDeduction = Math.abs(varianceUnits);
+        if (varianceUnits < 0) {
+          // Deficit / Shortage: We need to deduct |varianceUnits| from batches
+          let neededDeduction = Math.abs(varianceUnits);
 
-        // Fetch active batches sorted by FEFO (oldest expiry first)
-        const batches: any[] = await this.prisma.$queryRawUnsafe(
-          `SELECT id, quantity_units_remaining
-           FROM "${schemaName}".inventory_batches
-           WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
-           ORDER BY expiry_date ASC, created_at ASC`,
-          inventoryItemId,
-        );
-
-        for (const b of batches) {
-          if (neededDeduction <= 0) break;
-          const currentRemaining = Number(b.quantity_units_remaining) || 0;
-          const deductFromThisBatch = Math.min(currentRemaining, neededDeduction);
-
-          await this.prisma.$executeRawUnsafe(
-            `UPDATE "${schemaName}".inventory_batches
-             SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
-             WHERE id = $2::uuid`,
-            deductFromThisBatch,
-            b.id,
-          );
-
-          neededDeduction -= deductFromThisBatch;
-        }
-      } else if (varianceUnits > 0) {
-        // Surplus: We need to add varianceUnits to stock
-        // Check if there is an active batch, otherwise create an adjustment batch
-        const existingBatches: any[] = await this.prisma.$queryRawUnsafe(
-          `SELECT id, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date
-           FROM "${schemaName}".inventory_batches
-           WHERE inventory_item_id = $1::uuid
-           ORDER BY created_at DESC LIMIT 1`,
-          inventoryItemId,
-        );
-
-        if (existingBatches.length > 0) {
-          // Add to latest batch
-          await this.prisma.$executeRawUnsafe(
-            `UPDATE "${schemaName}".inventory_batches
-             SET quantity_units_remaining = quantity_units_remaining + $1
-             WHERE id = $2::uuid`,
-            varianceUnits,
-            existingBatches[0].id,
-          );
-        } else {
-          // Create an adjustment batch
-          const newBatchId = crypto.randomUUID();
-          const nextYear = new Date().getFullYear() + 2;
-          await this.prisma.$executeRawUnsafe(
-            `INSERT INTO "${schemaName}".inventory_batches
-             (id, inventory_item_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
-             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::date, FALSE, FALSE, NOW())`,
-            newBatchId,
+          // Fetch active batches sorted by FEFO (oldest expiry first) with row locks
+          const batches: any[] = await tx.$queryRawUnsafe(
+            `SELECT id, quantity_units_remaining
+             FROM "${schemaName}".inventory_batches
+             WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
+             ORDER BY expiry_date ASC, created_at ASC
+             FOR UPDATE`,
             inventoryItemId,
-            `ADJ-STOCKTAKE-${new Date().getFullYear()}`,
-            item.purchase_price_pack || 0,
-            item.selling_price_pack || 0,
-            item.units_per_pack > 1 ? Math.round(item.selling_price_pack / item.units_per_pack) : item.selling_price_pack,
-            varianceUnits,
-            `${nextYear}-12-01`,
           );
+
+          for (const b of batches) {
+            if (neededDeduction <= 0) break;
+            const currentRemaining = Number(b.quantity_units_remaining) || 0;
+            const deductFromThisBatch = Math.min(currentRemaining, neededDeduction);
+
+            await tx.$executeRawUnsafe(
+              `UPDATE "${schemaName}".inventory_batches
+               SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
+               WHERE id = $2::uuid`,
+              deductFromThisBatch,
+              b.id,
+            );
+
+            neededDeduction -= deductFromThisBatch;
+          }
+        } else if (varianceUnits > 0) {
+          // Surplus: We need to add varianceUnits to stock
+          const existingBatches: any[] = await tx.$queryRawUnsafe(
+            `SELECT id, purchase_price_pack, selling_price_pack, selling_price_unit, expiry_date
+             FROM "${schemaName}".inventory_batches
+             WHERE inventory_item_id = $1::uuid
+             ORDER BY created_at DESC LIMIT 1
+             FOR UPDATE`,
+            inventoryItemId,
+          );
+
+          if (existingBatches.length > 0) {
+            // Add to latest batch
+            await tx.$executeRawUnsafe(
+              `UPDATE "${schemaName}".inventory_batches
+               SET quantity_units_remaining = quantity_units_remaining + $1
+               WHERE id = $2::uuid`,
+              varianceUnits,
+              existingBatches[0].id,
+            );
+          } else {
+            // Create an adjustment batch
+            const newBatchId = crypto.randomUUID();
+            const nextYear = new Date().getFullYear() + 2;
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "${schemaName}".inventory_batches
+               (id, inventory_item_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+               VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::date, FALSE, FALSE, NOW())`,
+              newBatchId,
+              inventoryItemId,
+              null, // Strictly null: no fabricated batch numbers
+              item.purchase_price_pack || 0,
+              item.selling_price_pack || 0,
+              item.units_per_pack > 1 ? Math.round(item.selling_price_pack / item.units_per_pack) : item.selling_price_pack,
+              varianceUnits,
+              `${nextYear}-12-01`,
+            );
+          }
         }
       }
-    }
 
-    // 5.4 Mark Session as COMPLETED
-    await this.prisma.$executeRawUnsafe(
-      `UPDATE "${schemaName}".stocktake_sessions
-       SET status = 'COMPLETED',
-           reconciled_by_user_id = $1::uuid,
-           reconciled_by_name = $2,
-           reconciled_at = NOW(),
-           notes = COALESCE($3, notes),
-           updated_at = NOW()
-       WHERE id = $4::uuid`,
-      user?.id || null,
-      user?.name || 'مدير الصيدلية',
-      dto.notes || null,
-      sessionId,
-    );
+      // 5.4 Mark Session as COMPLETED
+      await tx.$executeRawUnsafe(
+        `UPDATE "${schemaName}".stocktake_sessions
+         SET status = 'COMPLETED',
+             reconciled_by_user_id = $1::uuid,
+             reconciled_by_name = $2,
+             reconciled_at = NOW(),
+             notes = COALESCE($3, notes),
+             updated_at = NOW()
+         WHERE id = $4::uuid`,
+        user?.id || null,
+        user?.name || 'مدير الصيدلية',
+        dto.notes || null,
+        sessionId,
+      );
+    }, { timeout: 60000, maxWait: 15000 });
 
     // 5.5 Emit Live Inventory Sync Event to update all POS clients & inventory views
     this.eventEmitter.emit('inventory.synced', {

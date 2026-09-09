@@ -12,11 +12,42 @@ export class ReportsService {
     private readonly tenantContext: TenantContextService,
   ) {}
 
+  private static verifiedReportSchemas = new Set<string>();
+
+  /**
+   * Helper to ensure report-critical columns exist in tenant schema
+   */
+  private async ensureReportColumnsExist(schemaName: string): Promise<void> {
+    if (ReportsService.verifiedReportSchemas.has(schemaName)) return;
+    try {
+      await this.prisma.$executeRawUnsafe(`
+        DO $$ 
+        BEGIN
+          ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS cost_price_pack DECIMAL(12, 2) DEFAULT 0;
+          ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS cost_price_unit DECIMAL(12, 2) DEFAULT 0;
+          ALTER TABLE "${schemaName}".sale_items ADD COLUMN IF NOT EXISTS total_cost DECIMAL(12, 2) DEFAULT 0;
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS inventory_batch_id UUID;
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS item_condition VARCHAR(20) DEFAULT 'RESALEABLE';
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'CASH';
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS user_name VARCHAR(150);
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS notes TEXT;
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS trade_name VARCHAR(255);
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS unit_cost DECIMAL(12, 2) DEFAULT 0;
+          ALTER TABLE "${schemaName}".returns ADD COLUMN IF NOT EXISTS total_cost DECIMAL(12, 2) DEFAULT 0;
+        END $$;
+      `);
+      ReportsService.verifiedReportSchemas.add(schemaName);
+    } catch (err: any) {
+      this.logger.warn(`Could not verify report columns for ${schemaName}: ${err.message}`);
+    }
+  }
+
   /**
    * Financial Profit & Loss Report for a given date range
    */
   async getFinancialReport(dto: DateRangeDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    await this.ensureReportColumnsExist(schemaName);
 
     let dateFilter = '';
     const params: any[] = [];
@@ -258,6 +289,7 @@ export class ReportsService {
    */
   async getSoldMedicinesStocktake(dto: DateRangeDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    await this.ensureReportColumnsExist(schemaName);
 
     let dateFilter = '';
     const params: any[] = [];
@@ -456,6 +488,7 @@ export class ReportsService {
    */
   async getNetProfitReport(dto: DateRangeDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    await this.ensureReportColumnsExist(schemaName);
 
     let dateFilter = '';
     const params: any[] = [];
@@ -1005,6 +1038,7 @@ export class ReportsService {
    */
   async getReturnsAuditReport(dto: DateRangeDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    await this.ensureReportColumnsExist(schemaName);
 
     let dateFilter = '';
     const params: any[] = [];

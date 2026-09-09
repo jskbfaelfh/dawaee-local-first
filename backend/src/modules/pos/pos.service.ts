@@ -96,7 +96,7 @@ export class PosService {
   }
 
   /**
-   * Process Checkout / Sale with FEFO inventory deduction, negative stock allowance, and offlineId idempotency
+   * Process Checkout / Sale with FEFO inventory deduction, strict zero-depleted-stock rejection, and offlineId idempotency
    */
   async checkout(dto: CheckoutDto) {
     const rawSchema = this.tenantContext.getSchemaName();
@@ -265,79 +265,18 @@ export class PosService {
                 });
               }
 
-              // Negative Stock / Deficit Handling
+              // Strict Pharmaceutical Stock Safety: Reject sales of depleted stock
               if (unitsLeftToDeduct > 0) {
-                this.logger.warn(
-                  `Negative stock allowance triggered for Item ${item.inventoryItemId}. Deficit: ${unitsLeftToDeduct} units.`
+                const itemName = invItem.custom_name || invItem.trade_name || 'الدواء';
+                const totalUnitsAvailable = availableBatches.reduce(
+                  (sum: number, b: any) => sum + Math.max(0, Number(b.quantity_units_remaining || 0)),
+                  0,
                 );
-
-                if (availableBatches.length > 0) {
-                  const latestBatch = availableBatches[availableBatches.length - 1];
-                  await tx.$executeRawUnsafe(
-                    `UPDATE "${schemaName}".inventory_batches 
-                     SET quantity_units_remaining = quantity_units_remaining - $1 
-                     WHERE id = $2::uuid`,
-                    unitsLeftToDeduct,
-                    latestBatch.id,
-                  );
-
-                  const latestPackPrice = latestBatch.selling_price_pack != null ? Number(latestBatch.selling_price_pack) : defaultPackPrice;
-                  const latestUnitPrice = latestBatch.selling_price_unit != null ? Number(latestBatch.selling_price_unit) : defaultUnitPrice;
-
-                  const deficitQty = isPack ? Math.round((unitsLeftToDeduct / unitsPerPack) * 100) / 100 : unitsLeftToDeduct;
-                  const deficitUnitPrice = isPack ? latestPackPrice : latestUnitPrice;
-                  const deficitLineTotal = deficitUnitPrice * deficitQty;
-
-                  const deficitCostPack = Number(latestBatch.purchase_price_pack) || 0;
-                  const deficitCostUnit = unitsPerPack > 0 ? deficitCostPack / unitsPerPack : deficitCostPack;
-                  const deficitLineCost = isPack ? deficitCostPack * deficitQty : deficitCostUnit * deficitQty;
-
-                  subtotal += deficitLineTotal;
-
-                  lineItemsToInsert.push({
-                    id: crypto.randomUUID(),
-                    saleId,
-                    inventoryItemId: item.inventoryItemId,
-                    inventoryBatchId: latestBatch.id,
-                    unitType: item.unitType,
-                    quantity: deficitQty,
-                    unitPrice: deficitUnitPrice,
-                    totalPrice: deficitLineTotal,
-                    costPricePack: deficitCostPack,
-                    costPriceUnit: deficitCostUnit,
-                    totalCost: deficitLineCost,
-                  });
-                } else {
-                  // Auto deficit batch placeholder
-                  const placeholderBatchId = crypto.randomUUID();
-                  await tx.$executeRawUnsafe(
-                    `INSERT INTO "${schemaName}".inventory_batches 
-                     (id, inventory_item_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, created_at) 
-                     VALUES ($1::uuid, $2::uuid, 'AUTO-DEFICIT', 0, $3, $4, $5, (CURRENT_DATE + interval '2 years')::date, FALSE, NOW())`,
-                    placeholderBatchId,
-                    item.inventoryItemId,
-                    defaultPackPrice,
-                    defaultUnitPrice,
-                    -unitsToDeduct,
-                  );
-
-                  const lineTotal = (isPack ? defaultPackPrice : defaultUnitPrice) * item.quantity;
-                  subtotal += lineTotal;
-
-                  lineItemsToInsert.push({
-                    id: crypto.randomUUID(),
-                    saleId,
-                    inventoryItemId: item.inventoryItemId,
-                    inventoryBatchId: placeholderBatchId,
-                    unitType: item.unitType,
-                    quantity: item.quantity,
-                    unitPrice: isPack ? defaultPackPrice : defaultUnitPrice,
-                    totalPrice: lineTotal,
-                    costPricePack: 0,
-                    costPriceUnit: 0,
-                    totalCost: 0,
-                  });
-                }
+                const reqPacks = isPack ? item.quantity : Math.round((unitsToDeduct / unitsPerPack) * 100) / 100;
+                const availPacks = Math.round((totalUnitsAvailable / unitsPerPack) * 100) / 100;
+                throw new BadRequestException(
+                  `الكمية المطلوبة من دواء (${itemName}) غير متوفرة في المخزون. المطلوب: ${reqPacks} علبة (${unitsToDeduct} وحدة)، المتوفر: ${availPacks} علبة (${totalUnitsAvailable} وحدة). يرجى تسجيل فاتورة شراء للدواء أولاً لتحديث الرصيد والتشغيلات.`,
+                );
               }
             }
 
@@ -391,7 +330,8 @@ export class PosService {
           },
           {
             isolationLevel: 'ReadCommitted' as any,
-            timeout: 15000,
+            maxWait: 15000,
+            timeout: 60000,
           },
         );
         break; // Success, exit retry loop
@@ -545,7 +485,7 @@ export class PosService {
         `SELECT si.id, si.inventory_batch_id, si.unit_type, si.quantity, si.unit_price,
                 si.cost_price_pack, si.cost_price_unit, si.total_cost,
                 COALESCE(b.purchase_price_pack, 0) as batch_purchase_price_pack,
-                COALESCE(b.batch_number, 'BATCH') as batch_number, b.expiry_date
+                b.batch_number, b.expiry_date
          FROM "${schemaName}".sale_items si
          LEFT JOIN "${schemaName}".inventory_batches b ON si.inventory_batch_id = b.id
          WHERE si.sale_id = $1::uuid AND si.inventory_item_id = $2::uuid
@@ -713,7 +653,7 @@ export class PosService {
         const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
         allocations.push({
           batchId: batchRows[0].id,
-          batchNumber: batchRows[0].batch_number || 'UNKNOWN',
+          batchNumber: batchRows[0].batch_number || null,
           units: unitsToReturn,
           unitPrice: defaultPrice,
           costPricePack: bCostPack,
@@ -753,7 +693,7 @@ export class PosService {
         const bCostUnit = unitsPerPack > 0 ? bCostPack / unitsPerPack : bCostPack;
         allocations.push({
           batchId: targetBatch.id,
-          batchNumber: targetBatch.batch_number || 'UNKNOWN',
+          batchNumber: targetBatch.batch_number || null,
           units: unitsToReturn,
           unitPrice: defaultPrice,
           costPricePack: bCostPack,
@@ -902,7 +842,7 @@ export class PosService {
         r.sale_id as "saleId",
         r.inventory_item_id as "inventoryItemId",
         r.inventory_batch_id as "inventoryBatchId",
-        COALESCE(b.batch_number, 'BATCH') as "batchNumber",
+        b.batch_number as "batchNumber",
         COALESCE(r.trade_name, m.trade_name, 'دواء') as "tradeName",
         r.unit_type as "unitType",
         r.quantity,

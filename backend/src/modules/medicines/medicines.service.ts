@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
+import { decryptSecret } from '../../common/utils/security.util';
 import { CreateMedicineDto, QueryMedicineDto } from './dto/create-medicine.dto';
 
 @Injectable()
@@ -391,7 +392,15 @@ export class MedicinesService {
       select: { geminiApiKey: true, name: true },
     });
 
-    const apiKey = tenant?.geminiApiKey?.trim() || process.env.GEMINI_API_KEY;
+    let rawKey = tenant?.geminiApiKey?.trim();
+    if (rawKey) {
+      try {
+        rawKey = decryptSecret(rawKey);
+      } catch {
+        // Fallback to existing
+      }
+    }
+    const apiKey = rawKey || process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new BadRequestException(
         'ميزة البحث الذكي باللغة الطبيعية والصوت تتطلب تفعيل مفتاح (Google Gemini API Key) في إعدادات الصيدلية.',

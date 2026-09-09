@@ -41,6 +41,7 @@ export class InventoryService {
 
     try {
       const ddl = `
+        CREATE SEQUENCE IF NOT EXISTS "${schemaName}".purchase_invoice_seq START 1;
         CREATE TABLE IF NOT EXISTS "${schemaName}".suppliers (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           name VARCHAR(255) NOT NULL,
@@ -140,9 +141,25 @@ export class InventoryService {
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS selling_price_unit DECIMAL(12, 2);
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_bonus BOOLEAN DEFAULT FALSE;
         ALTER TABLE "${schemaName}".purchase_items ADD COLUMN IF NOT EXISTS amortize_bonus BOOLEAN DEFAULT TRUE;
+        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS address TEXT;
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS company_name VARCHAR(255);
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS balance_due DECIMAL(12, 2) DEFAULT 0;
+        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS notes TEXT;
+        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(100);
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS supplier_id UUID;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255);
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS total_gross_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS total_discount_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS net_total_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS paid_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS remaining_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) NOT NULL DEFAULT 'PAID';
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS due_date DATE;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS notes TEXT;
+        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS net_paid_amount DECIMAL(12, 2) DEFAULT 0;
@@ -165,6 +182,30 @@ END $$;`;
     } catch (err: any) {
       InventoryService.verifiedSchemas.add(schemaName);
       this.logger.warn(`Could not verify purchase tables for ${schemaName}: ${err.message}`);
+    }
+  }
+
+  /**
+   * Atomically generate a collision-free sequential business invoice number from database sequence
+   * Format: PUR-YYYY-00001
+   */
+  async generatePurchaseInvoiceNumber(schema: string, tx?: any): Promise<string> {
+    const client = tx || this.prisma;
+    try {
+      const res: any[] = await client.$queryRawUnsafe(
+        `SELECT nextval('"${schema}".purchase_invoice_seq') as nextval;`
+      );
+      const seq = Number(res[0]?.nextval || 1);
+      const year = new Date().getFullYear();
+      return `PUR-${year}-${String(seq).padStart(5, '0')}`;
+    } catch {
+      await client.$executeRawUnsafe(`CREATE SEQUENCE IF NOT EXISTS "${schema}".purchase_invoice_seq START 1;`);
+      const res: any[] = await client.$queryRawUnsafe(
+        `SELECT nextval('"${schema}".purchase_invoice_seq') as nextval;`
+      );
+      const seq = Number(res[0]?.nextval || 1);
+      const year = new Date().getFullYear();
+      return `PUR-${year}-${String(seq).padStart(5, '0')}`;
     }
   }
 
@@ -396,17 +437,6 @@ END $$;`;
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
-    // 1. Verify supplier
-    const supRows: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT id, name FROM "${schemaName}".suppliers WHERE id = $1::uuid LIMIT 1`,
-      supplierId,
-    );
-
-    if (supRows.length === 0) {
-      throw new NotFoundException('المذخر غير موجود');
-    }
-
-    const supplier = supRows[0];
     const payAmount = Number(dto.amount);
 
     if (payAmount <= 0) {
@@ -431,87 +461,109 @@ END $$;`;
       finalNotes = finalNotes ? `${finalNotes} - ${discountLabel}` : discountLabel;
     }
 
-    // 2. Insert Payment Voucher Record
     const paymentId = crypto.randomUUID();
     const payDate = dto.paymentDate || new Date().toISOString().slice(0, 10);
 
-    await this.prisma.$executeRawUnsafe(
-      `INSERT INTO "${schemaName}".supplier_payments
-       (id, supplier_id, amount, discount_percent, discount_amount, net_paid_amount, payment_date, payment_method, receipt_number, notes, receipt_image, created_at)
-       VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, NOW())`,
-      paymentId,
-      supplierId,
-      payAmount,
-      discountPercent,
-      discountAmount,
-      netPaidAmount,
-      payDate,
-      dto.paymentMethod || 'CASH',
-      dto.receiptNumber || null,
-      finalNotes || null,
-      dto.receiptImage || null,
-    );
-
-    // 3. Deduct payment from unpaid purchases using FIFO
-    const unpaidPurchases: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT id, net_total_amount, paid_amount, remaining_amount
-       FROM "${schemaName}".purchases
-       WHERE supplier_id = $1::uuid AND remaining_amount > 0
-       ORDER BY created_at ASC;`,
-      supplierId,
-    );
-
-    let remainingToDeduct = payAmount;
-
-    for (const p of unpaidPurchases) {
-      if (remainingToDeduct <= 0) break;
-
-      const pRemaining = Number(p.remaining_amount);
-      const deductFromThis = Math.min(remainingToDeduct, pRemaining);
-
-      const newPaid = Number(p.paid_amount) + deductFromThis;
-      const newRemaining = pRemaining - deductFromThis;
-      const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIAL';
-
-      await this.prisma.$executeRawUnsafe(
-        `UPDATE "${schemaName}".purchases
-         SET paid_amount = $1,
-             remaining_amount = $2,
-             payment_status = $3
-         WHERE id = $4::uuid`,
-        newPaid,
-        newRemaining,
-        newStatus,
-        p.id,
-      );
-
-      // Also keep purchase_invoices in sync
-      try {
-        await this.prisma.$executeRawUnsafe(
-          `UPDATE "${schemaName}".purchase_invoices
-           SET paid_amount = $1,
-               remaining_amount = $2,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $3::uuid`,
-          newPaid,
-          newRemaining,
-          p.id,
+    const { supplierName } = await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Verify supplier
+        const supRows: any[] = await tx.$queryRawUnsafe(
+          `SELECT id, name FROM "${schemaName}".suppliers WHERE id = $1::uuid LIMIT 1`,
+          supplierId,
         );
-      } catch {}
 
-      remainingToDeduct -= deductFromThis;
-    }
+        if (supRows.length === 0) {
+          throw new NotFoundException('المذخر غير موجود');
+        }
+
+        const supplier = supRows[0];
+
+        // 2. Insert Payment Voucher Record
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".supplier_payments
+           (id, supplier_id, amount, discount_percent, discount_amount, net_paid_amount, payment_date, payment_method, receipt_number, notes, receipt_image, created_at)
+           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, NOW())`,
+          paymentId,
+          supplierId,
+          payAmount,
+          discountPercent,
+          discountAmount,
+          netPaidAmount,
+          payDate,
+          dto.paymentMethod || 'CASH',
+          dto.receiptNumber || null,
+          finalNotes || null,
+          dto.receiptImage || null,
+        );
+
+        // 3. Deduct payment from unpaid purchases using FIFO
+        const unpaidPurchases: any[] = await tx.$queryRawUnsafe(
+          `SELECT id, net_total_amount, paid_amount, remaining_amount
+           FROM "${schemaName}".purchases
+           WHERE supplier_id = $1::uuid AND remaining_amount > 0
+           ORDER BY created_at ASC;`,
+          supplierId,
+        );
+
+        let remainingToDeduct = payAmount;
+
+        for (const p of unpaidPurchases) {
+          if (remainingToDeduct <= 0) break;
+
+          const pRemaining = Number(p.remaining_amount);
+          const deductFromThis = Math.min(remainingToDeduct, pRemaining);
+
+          const newPaid = Number(p.paid_amount) + deductFromThis;
+          const newRemaining = pRemaining - deductFromThis;
+          const newStatus = newRemaining === 0 ? 'PAID' : 'PARTIAL';
+
+          await tx.$executeRawUnsafe(
+            `UPDATE "${schemaName}".purchases
+             SET paid_amount = $1,
+                 remaining_amount = $2,
+                 payment_status = $3
+             WHERE id = $4::uuid`,
+            newPaid,
+            newRemaining,
+            newStatus,
+            p.id,
+          );
+
+          // Also keep purchase_invoices in sync
+          try {
+            await tx.$executeRawUnsafe(
+              `UPDATE "${schemaName}".purchase_invoices
+               SET paid_amount = $1,
+                   remaining_amount = $2,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = $3::uuid`,
+              newPaid,
+              newRemaining,
+              p.id,
+            );
+          } catch {}
+
+          remainingToDeduct -= deductFromThis;
+        }
+
+        return { supplierName: supplier.name };
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      }
+    );
 
     this.logger.log(
-      `Payment voucher of ${payAmount} IQD recorded for supplier ${supplier.name} in schema ${schemaName}`,
+      `Payment voucher of ${payAmount} IQD recorded for supplier ${supplierName} in schema ${schemaName}`,
     );
 
     return {
       success: true,
       message:
         discountAmount > 0
-          ? `تم توثيق تسديد بمبلغ (${payAmount.toLocaleString()} د.ع) مع خصم مكتسب (${discountAmount.toLocaleString()} د.ع) - الصافي المدفوع: (${netPaidAmount.toLocaleString()} د.ع) لمذخر (${supplier.name}) بنجاح`
-          : `تم توثيق تسديد دفعة بمبلغ (${payAmount.toLocaleString()} د.ع) لمذخر (${supplier.name}) بنجاح`,
+          ? `تم توثيق تسديد بمبلغ (${payAmount.toLocaleString()} د.ع) مع خصم مكتسب (${discountAmount.toLocaleString()} د.ع) - الصافي المدفوع: (${netPaidAmount.toLocaleString()} د.ع) لمذخر (${supplierName}) بنجاح`
+          : `تم توثيق تسديد دفعة بمبلغ (${payAmount.toLocaleString()} د.ع) لمذخر (${supplierName}) بنجاح`,
       paymentId,
     };
   }
@@ -519,12 +571,13 @@ END $$;`;
   /**
    * Create or find supplier by name
    */
-  async upsertSupplier(name: string, phone?: string) {
+  async upsertSupplier(name: string, phone?: string, tx?: any) {
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
+    const client = tx || this.prisma;
     const cleanName = name.trim();
-    const existing: any[] = await this.prisma.$queryRawUnsafe(
+    const existing: any[] = await client.$queryRawUnsafe(
       `SELECT id FROM "${schemaName}".suppliers WHERE LOWER(name) = LOWER($1) LIMIT 1`,
       cleanName,
     );
@@ -534,7 +587,7 @@ END $$;`;
     }
 
     const supplierId = crypto.randomUUID();
-    await this.prisma.$executeRawUnsafe(
+    await client.$executeRawUnsafe(
       `INSERT INTO "${schemaName}".suppliers (id, name, phone, created_at)
        VALUES ($1::uuid, $2, $3, NOW())`,
       supplierId,
@@ -594,15 +647,7 @@ END $$;`;
 
     await this.ensurePurchaseTablesExist(schemaName);
 
-    // 1. Resolve Supplier
-    let finalSupplierId: string | null = dto.supplierId || null;
-    if (!finalSupplierId && dto.supplierName && dto.supplierName.trim().length > 0) {
-      finalSupplierId = await this.upsertSupplier(dto.supplierName, dto.supplierPhone);
-    }
-
-    const processedMedicineIds: string[] = [];
-    const purchaseId = crypto.randomUUID();
-
+    // 0. Pre-calculate Invoice Totals & Direct Discount
     let invoiceGrossTotal = 0;
     let itemDiscountsTotal = 0;
     let subtotalBeforeDirectDiscount = 0;
@@ -619,7 +664,6 @@ END $$;`;
       subtotalBeforeDirectDiscount += net;
     }
 
-    // Direct Discount calculation
     let directDiscountAmount = 0;
     if (dto.directDiscountAmount !== undefined && Number(dto.directDiscountAmount) > 0) {
       directDiscountAmount = Math.min(subtotalBeforeDirectDiscount, Number(dto.directDiscountAmount));
@@ -630,215 +674,6 @@ END $$;`;
     const invoiceDiscountTotal = itemDiscountsTotal + directDiscountAmount;
     const invoiceNetTotal = Math.max(0, subtotalBeforeDirectDiscount - directDiscountAmount);
 
-    const purchaseItemsToInsert: any[] = [];
-
-    // Process each item in the invoice
-    for (const item of dto.items) {
-      let finalMedicineId = item.medicineId;
-      if (finalMedicineId) {
-        const check = await this.prisma.$queryRawUnsafe<any[]>(
-          `SELECT id FROM public.medicines WHERE id = $1::uuid LIMIT 1;`,
-          finalMedicineId,
-        );
-        if (check.length === 0) {
-          finalMedicineId = undefined;
-        }
-      }
-
-      // 1.1 If item is a new medicine not in catalog -> create in Master DB
-      if (!finalMedicineId && item.newMedicineData) {
-        const createdMed = await this.medicinesService.create({
-          ...item.newMedicineData,
-          defaultUnitsPerPack: item.unitsPerPack,
-          isVerified: false,
-        });
-        finalMedicineId = createdMed.id;
-      }
-
-      if (!finalMedicineId) {
-        throw new BadRequestException('معرف الدواء غير محدد');
-      }
-
-      processedMedicineIds.push(finalMedicineId);
-
-      // 1.2 Financial & Bonus calculations
-      const qtyPacks = Number(item.quantityPacks || 1);
-      const bonusPacks = Number(item.bonusPacks || 0);
-      const amortizeBonus = item.amortizeBonus !== false;
-      const discountPercent = Number(item.discountPercent || 0);
-      const purchasePricePack = Number(item.purchasePricePack || 0);
-
-      const lineGrossCost = qtyPacks * purchasePricePack;
-      const lineDiscountAmount = lineGrossCost * (discountPercent / 100);
-      const lineNetBeforeDirect = lineGrossCost - lineDiscountAmount;
-
-      // Allocate share of direct discount proportionally across items
-      const lineShareOfDirect = subtotalBeforeDirectDiscount > 0 && directDiscountAmount > 0
-        ? (lineNetBeforeDirect / subtotalBeforeDirectDiscount) * directDiscountAmount
-        : 0;
-      const finalLineNet = Math.max(0, lineNetBeforeDirect - lineShareOfDirect);
-
-      // If amortizeBonus is TRUE (default): cost is diluted across both purchased and bonus packs
-      // If amortizeBonus is FALSE: purchased batch keeps undiluted net cost, bonus batch cost = 0!
-      const effectiveNetCostPerPack = (amortizeBonus && bonusPacks > 0)
-        ? (qtyPacks + bonusPacks > 0 ? finalLineNet / (qtyPacks + bonusPacks) : purchasePricePack)
-        : (qtyPacks > 0 ? finalLineNet / qtyPacks : purchasePricePack);
-
-      // 1.3 Format Expiry Date: YYYY-MM-01
-      const expiryDateStr = `${item.expiryYear}-${String(item.expiryMonth).padStart(2, '0')}-01`;
-
-      // 1.4 Upsert Inventory Item in Tenant Schema
-      const existingItems: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT id, units_per_pack as "unitsPerPack", selling_price_pack as "sellingPricePack", selling_price_unit as "sellingPriceUnit", shelf_location as "shelfLocation"
-         FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1`,
-        finalMedicineId,
-      );
-
-      let inventoryItemId: string;
-      const existing = existingItems[0] || null;
-      const resolvedUnits = Number(
-        item.unitsPerPack > 1 ? item.unitsPerPack : existing?.unitsPerPack || 1,
-      );
-      const resolvedSellingPack = Number(
-        item.sellingPricePack > 0 ? item.sellingPricePack : existing?.sellingPricePack || 0,
-      );
-      let resolvedSellingUnit = Number(
-        item.sellingPriceUnit > 0 ? item.sellingPriceUnit : existing?.sellingPriceUnit || 0,
-      );
-      if (resolvedSellingUnit <= 0 && resolvedSellingPack > 0 && resolvedUnits > 0) {
-        resolvedSellingUnit = Math.round(resolvedSellingPack / resolvedUnits);
-      }
-      const resolvedShelf =
-        item.shelfLocation && item.shelfLocation.trim().length > 0
-          ? item.shelfLocation.trim()
-          : existing?.shelfLocation || null;
-
-      if (existing) {
-        inventoryItemId = existing.id;
-        // Update custom_name, selling prices, units per pack, and shelf_location safely
-        await this.prisma.$executeRawUnsafe(
-          `UPDATE "${schemaName}".inventory_items
-           SET custom_name = COALESCE($1, custom_name),
-               units_per_pack = $2,
-               selling_price_pack = $3,
-               selling_price_unit = $4,
-               min_alert_units = COALESCE($5, min_alert_units),
-               shelf_location = COALESCE($6, shelf_location),
-               updated_at = NOW()
-           WHERE id = $7::uuid`,
-          item.customName || null,
-          resolvedUnits,
-          resolvedSellingPack,
-          resolvedSellingUnit,
-          item.minAlertUnits || 5,
-          resolvedShelf,
-          inventoryItemId,
-        );
-      } else {
-        inventoryItemId = crypto.randomUUID();
-        await this.prisma.$executeRawUnsafe(
-          `INSERT INTO "${schemaName}".inventory_items
-           (id, medicine_id, custom_name, units_per_pack, selling_price_pack, selling_price_unit, min_alert_units, shelf_location, created_at, updated_at)
-           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
-          inventoryItemId,
-          finalMedicineId,
-          item.customName || null,
-          resolvedUnits,
-          resolvedSellingPack,
-          resolvedSellingUnit,
-          item.minAlertUnits || 5,
-          resolvedShelf,
-        );
-      }
-
-      // 1.5 Insert Batch Record(s) into Tenant Schema
-      if (!amortizeBonus && bonusPacks > 0) {
-        // Case A: Separate Batches (وجبة الشراء الأساسية + وجبة دواء بونص منفصلة بسعر 0 د.ع)
-        // 1.5.1 Purchased Batch
-        const purchasedUnits = qtyPacks * resolvedUnits;
-        const purchasedBatchId = crypto.randomUUID();
-        await this.prisma.$executeRawUnsafe(
-          `INSERT INTO "${schemaName}".inventory_batches
-           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
-          purchasedBatchId,
-          inventoryItemId,
-          finalSupplierId,
-          purchaseId,
-          item.batchNumber || null,
-          Math.round(effectiveNetCostPerPack),
-          resolvedSellingPack,
-          resolvedSellingUnit,
-          purchasedUnits,
-          expiryDateStr,
-        );
-
-        // 1.5.2 Bonus Batch (وجبة دواء بونص منفصلة بسعر شراء 0 د.ع)
-        const bonusUnits = bonusPacks * resolvedUnits;
-        const bonusBatchId = crypto.randomUUID();
-        const bonusBatchNumber = (item.bonusBatchNumber && item.bonusBatchNumber.trim().length > 0)
-          ? item.bonusBatchNumber.trim()
-          : (item.batchNumber ? `${item.batchNumber}-BONUS` : 'BN-BONUS');
-        const bonusExpiryDateStr = (item.bonusExpiryYear && item.bonusExpiryMonth)
-          ? `${item.bonusExpiryYear}-${String(item.bonusExpiryMonth).padStart(2, '0')}-01`
-          : expiryDateStr;
-
-        await this.prisma.$executeRawUnsafe(
-          `INSERT INTO "${schemaName}".inventory_batches
-           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 0, $6, $7, $8, $9::date, FALSE, TRUE, NOW())`,
-          bonusBatchId,
-          inventoryItemId,
-          finalSupplierId,
-          purchaseId,
-          bonusBatchNumber,
-          resolvedSellingPack,
-          resolvedSellingUnit,
-          bonusUnits,
-          bonusExpiryDateStr,
-        );
-      } else {
-        // Case B: Amortized / Dissolved (تذويب البونص في السعر - وجبة واحدة جامعة)
-        const totalPacksReceived = qtyPacks + bonusPacks;
-        const totalUnits = totalPacksReceived * resolvedUnits;
-        const batchId = crypto.randomUUID();
-
-        await this.prisma.$executeRawUnsafe(
-          `INSERT INTO "${schemaName}".inventory_batches
-           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
-           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
-          batchId,
-          inventoryItemId,
-          finalSupplierId,
-          purchaseId,
-          item.batchNumber || null,
-          Math.round(effectiveNetCostPerPack),
-          resolvedSellingPack,
-          resolvedSellingUnit,
-          totalUnits,
-          expiryDateStr,
-        );
-      }
-
-      purchaseItemsToInsert.push({
-        id: crypto.randomUUID(),
-        purchaseId,
-        inventoryItemId,
-        quantityPacks: qtyPacks,
-        bonusPacks,
-        amortizeBonus,
-        unitsPerPack: item.unitsPerPack,
-        purchasePricePack,
-        discountPercent,
-        netCostPack: Math.round(effectiveNetCostPerPack),
-        sellingPricePack: resolvedSellingPack,
-        sellingPriceUnit: resolvedSellingUnit,
-        expiryDate: expiryDateStr,
-        batchNumber: item.batchNumber || null,
-      });
-    }
-
-    // 2. Determine Payment amounts
     const paymentStatus = dto.paymentStatus || 'PAID';
     let paidAmount = Number(dto.paidAmount !== undefined ? dto.paidAmount : invoiceNetTotal);
     if (paymentStatus === 'PAID') {
@@ -852,62 +687,307 @@ END $$;`;
       ? [dto.notes, `خصم مباشر: ${directDiscountAmount.toLocaleString()} د.ع`].filter(Boolean).join(' | ')
       : dto.notes || null;
 
-    // 3. Record Purchase Header
-    await this.prisma.$executeRawUnsafe(
-      `INSERT INTO "${schemaName}".purchases
-       (id, invoice_number, supplier_id, supplier_name, total_gross_amount, total_discount_amount, net_total_amount, paid_amount, remaining_amount, payment_status, due_date, notes, created_at)
-       VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, NOW())`,
-      purchaseId,
-      dto.supplierInvoiceNumber || null,
-      finalSupplierId,
-      dto.supplierName || null,
-      invoiceGrossTotal,
-      invoiceDiscountTotal,
-      invoiceNetTotal,
-      paidAmount,
-      remainingAmount,
-      paymentStatus,
-      dto.dueDate || null,
-      finalNotes,
+    // Execute the bulk stock entry atomically inside an ACID transaction
+    const transactionResult = await this.prisma.$transaction(
+      async (tx) => {
+        // Resolve or generate atomic sequential invoice number
+        const invoiceNumber = (dto.supplierInvoiceNumber && dto.supplierInvoiceNumber.trim().length > 0)
+          ? dto.supplierInvoiceNumber.trim()
+          : await this.generatePurchaseInvoiceNumber(schemaName, tx);
+
+        // 1. Resolve Supplier
+        let finalSupplierId: string | null = dto.supplierId || null;
+        if (!finalSupplierId && dto.supplierName && dto.supplierName.trim().length > 0) {
+          finalSupplierId = await this.upsertSupplier(dto.supplierName, dto.supplierPhone, tx);
+        }
+
+        const processedMedicineIds: string[] = [];
+        const purchaseId = crypto.randomUUID();
+        const purchaseItemsToInsert: any[] = [];
+
+        // Process each item in the invoice
+        for (const item of dto.items) {
+          let finalMedicineId = item.medicineId;
+          if (finalMedicineId) {
+            const check = await tx.$queryRawUnsafe<any[]>(
+              `SELECT id FROM public.medicines WHERE id = $1::uuid LIMIT 1;`,
+              finalMedicineId,
+            );
+            if (check.length === 0) {
+              finalMedicineId = undefined;
+            }
+          }
+
+          // 1.1 If item is a new medicine not in catalog -> create in Master DB
+          if (!finalMedicineId && item.newMedicineData) {
+            const createdMed = await tx.medicine.create({
+              data: {
+                tradeName: item.newMedicineData.tradeName.trim(),
+                scientificName: item.newMedicineData.scientificName?.trim() || null,
+                dosageForm: item.newMedicineData.dosageForm || null,
+                strength: item.newMedicineData.strength || null,
+                manufacturer: item.newMedicineData.manufacturer || null,
+                barcode: item.newMedicineData.barcode?.trim() || null,
+                defaultUnitsPerPack: item.unitsPerPack || 1,
+                isVerified: false,
+                needsPackagingReview: true,
+              },
+            });
+            finalMedicineId = createdMed.id;
+          }
+
+          if (!finalMedicineId) {
+            throw new BadRequestException('معرف الدواء غير محدد');
+          }
+
+          processedMedicineIds.push(finalMedicineId);
+
+          // 1.2 Financial & Bonus calculations
+          const qtyPacks = Number(item.quantityPacks || 1);
+          const bonusPacks = Number(item.bonusPacks || 0);
+          const amortizeBonus = item.amortizeBonus !== false;
+          const discountPercent = Number(item.discountPercent || 0);
+          const purchasePricePack = Number(item.purchasePricePack || 0);
+
+          const lineGrossCost = qtyPacks * purchasePricePack;
+          const lineDiscountAmount = lineGrossCost * (discountPercent / 100);
+          const lineNetBeforeDirect = lineGrossCost - lineDiscountAmount;
+
+          // Allocate share of direct discount proportionally across items
+          const lineShareOfDirect = subtotalBeforeDirectDiscount > 0 && directDiscountAmount > 0
+            ? (lineNetBeforeDirect / subtotalBeforeDirectDiscount) * directDiscountAmount
+            : 0;
+          const finalLineNet = Math.max(0, lineNetBeforeDirect - lineShareOfDirect);
+
+          // If amortizeBonus is TRUE (default): cost is diluted across both purchased and bonus packs
+          // If amortizeBonus is FALSE: purchased batch keeps undiluted net cost, bonus batch cost = 0!
+          const effectiveNetCostPerPack = (amortizeBonus && bonusPacks > 0)
+            ? (qtyPacks + bonusPacks > 0 ? finalLineNet / (qtyPacks + bonusPacks) : purchasePricePack)
+            : (qtyPacks > 0 ? finalLineNet / qtyPacks : purchasePricePack);
+
+          // 1.3 Format Expiry Date: YYYY-MM-01
+          const expiryDateStr = `${item.expiryYear}-${String(item.expiryMonth).padStart(2, '0')}-01`;
+
+          // 1.4 Upsert Inventory Item in Tenant Schema
+          const existingItems: any[] = await tx.$queryRawUnsafe(
+            `SELECT id, units_per_pack as "unitsPerPack", selling_price_pack as "sellingPricePack", selling_price_unit as "sellingPriceUnit", shelf_location as "shelfLocation"
+             FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1`,
+            finalMedicineId,
+          );
+
+          let inventoryItemId: string;
+          const existing = existingItems[0] || null;
+          const resolvedUnits = Number(
+            item.unitsPerPack > 1 ? item.unitsPerPack : existing?.unitsPerPack || 1,
+          );
+          const resolvedSellingPack = Number(
+            item.sellingPricePack > 0 ? item.sellingPricePack : existing?.sellingPricePack || 0,
+          );
+          let resolvedSellingUnit = Number(
+            item.sellingPriceUnit > 0 ? item.sellingPriceUnit : existing?.sellingPriceUnit || 0,
+          );
+          if (resolvedSellingUnit <= 0 && resolvedSellingPack > 0 && resolvedUnits > 0) {
+            resolvedSellingUnit = Math.round(resolvedSellingPack / resolvedUnits);
+          }
+          const resolvedShelf =
+            item.shelfLocation && item.shelfLocation.trim().length > 0
+              ? item.shelfLocation.trim()
+              : existing?.shelfLocation || null;
+
+          if (existing) {
+            inventoryItemId = existing.id;
+            // Update custom_name, selling prices, units per pack, and shelf_location safely
+            await tx.$executeRawUnsafe(
+              `UPDATE "${schemaName}".inventory_items
+               SET custom_name = COALESCE($1, custom_name),
+                   units_per_pack = $2,
+                   selling_price_pack = $3,
+                   selling_price_unit = $4,
+                   min_alert_units = COALESCE($5, min_alert_units),
+                   shelf_location = COALESCE($6, shelf_location),
+                   updated_at = NOW()
+               WHERE id = $7::uuid`,
+              item.customName || null,
+              resolvedUnits,
+              resolvedSellingPack,
+              resolvedSellingUnit,
+              item.minAlertUnits || 5,
+              resolvedShelf,
+              inventoryItemId,
+            );
+          } else {
+            inventoryItemId = crypto.randomUUID();
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "${schemaName}".inventory_items
+               (id, medicine_id, custom_name, units_per_pack, selling_price_pack, selling_price_unit, min_alert_units, shelf_location, created_at, updated_at)
+               VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+              inventoryItemId,
+              finalMedicineId,
+              item.customName || null,
+              resolvedUnits,
+              resolvedSellingPack,
+              resolvedSellingUnit,
+              item.minAlertUnits || 5,
+              resolvedShelf,
+            );
+          }
+
+          // 1.5 Insert Batch Record(s) into Tenant Schema
+          if (!amortizeBonus && bonusPacks > 0) {
+            // Case A: Separate Batches (وجبة الشراء الأساسية + وجبة دواء بونص منفصلة بسعر 0 د.ع)
+            // 1.5.1 Purchased Batch
+            const purchasedUnits = qtyPacks * resolvedUnits;
+            const purchasedBatchId = crypto.randomUUID();
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "${schemaName}".inventory_batches
+               (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+               VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
+              purchasedBatchId,
+              inventoryItemId,
+              finalSupplierId,
+              purchaseId,
+              item.batchNumber || null,
+              Math.round(effectiveNetCostPerPack),
+              resolvedSellingPack,
+              resolvedSellingUnit,
+              purchasedUnits,
+              expiryDateStr,
+            );
+
+            // 1.5.2 Bonus Batch (وجبة دواء بونص منفصلة بسعر شراء 0 د.ع)
+            const bonusUnits = bonusPacks * resolvedUnits;
+            const bonusBatchId = crypto.randomUUID();
+            const bonusBatchNumber = (item.bonusBatchNumber && item.bonusBatchNumber.trim().length > 0 && item.bonusBatchNumber.trim() !== 'null' && item.bonusBatchNumber.trim() !== 'N/A')
+              ? item.bonusBatchNumber.trim()
+              : (item.batchNumber ? `${item.batchNumber}-BONUS` : null);
+            const bonusExpiryDateStr = (item.bonusExpiryYear && item.bonusExpiryMonth)
+              ? `${item.bonusExpiryYear}-${String(item.bonusExpiryMonth).padStart(2, '0')}-01`
+              : expiryDateStr;
+
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "${schemaName}".inventory_batches
+               (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+               VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 0, $6, $7, $8, $9::date, FALSE, TRUE, NOW())`,
+              bonusBatchId,
+              inventoryItemId,
+              finalSupplierId,
+              purchaseId,
+              bonusBatchNumber,
+              resolvedSellingPack,
+              resolvedSellingUnit,
+              bonusUnits,
+              bonusExpiryDateStr,
+            );
+          } else {
+            // Case B: Amortized / Dissolved (تذويب البونص في السعر - وجبة واحدة جامعة)
+            const totalPacksReceived = qtyPacks + bonusPacks;
+            const totalUnits = totalPacksReceived * resolvedUnits;
+            const batchId = crypto.randomUUID();
+
+            await tx.$executeRawUnsafe(
+              `INSERT INTO "${schemaName}".inventory_batches
+               (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+               VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
+              batchId,
+              inventoryItemId,
+              finalSupplierId,
+              purchaseId,
+              item.batchNumber || null,
+              Math.round(effectiveNetCostPerPack),
+              resolvedSellingPack,
+              resolvedSellingUnit,
+              totalUnits,
+              expiryDateStr,
+            );
+          }
+
+          purchaseItemsToInsert.push({
+            id: crypto.randomUUID(),
+            purchaseId,
+            inventoryItemId,
+            quantityPacks: qtyPacks,
+            bonusPacks,
+            amortizeBonus,
+            unitsPerPack: item.unitsPerPack,
+            purchasePricePack,
+            discountPercent,
+            netCostPack: Math.round(effectiveNetCostPerPack),
+            sellingPricePack: resolvedSellingPack,
+            sellingPriceUnit: resolvedSellingUnit,
+            expiryDate: expiryDateStr,
+            batchNumber: item.batchNumber || null,
+          });
+        }
+
+        // 2. Record Purchase Header
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".purchases
+           (id, invoice_number, supplier_id, supplier_name, total_gross_amount, total_discount_amount, net_total_amount, paid_amount, remaining_amount, payment_status, due_date, notes, created_at)
+           VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11::date, $12, NOW())`,
+          purchaseId,
+          invoiceNumber,
+          finalSupplierId,
+          dto.supplierName || null,
+          invoiceGrossTotal,
+          invoiceDiscountTotal,
+          invoiceNetTotal,
+          paidAmount,
+          remainingAmount,
+          paymentStatus,
+          dto.dueDate || null,
+          finalNotes,
+        );
+
+        // 3. Record Purchase Line Items
+        for (const pi of purchaseItemsToInsert) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO "${schemaName}".purchase_items
+             (id, purchase_id, inventory_item_id, quantity_packs, bonus_packs, amortize_bonus, units_per_pack, purchase_price_pack, discount_percent, net_cost_pack, selling_price_pack, selling_price_unit, expiry_date, batch_number)
+             VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::date, $14)`,
+            pi.id,
+            pi.purchaseId,
+            pi.inventoryItemId,
+            pi.quantityPacks,
+            pi.bonusPacks,
+            pi.amortizeBonus,
+            pi.unitsPerPack,
+            pi.purchasePricePack,
+            pi.discountPercent,
+            pi.netCostPack,
+            pi.sellingPricePack,
+            pi.sellingPriceUnit,
+            pi.expiryDate,
+            pi.batchNumber,
+          );
+        }
+
+        return {
+          purchaseId,
+          invoiceNumber,
+          processedMedicineIds,
+        };
+      },
+      {
+        maxWait: 10000,
+        timeout: 30000,
+      }
     );
 
-    // 4. Record Purchase Line Items
-    for (const pi of purchaseItemsToInsert) {
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}".purchase_items
-         (id, purchase_id, inventory_item_id, quantity_packs, bonus_packs, amortize_bonus, units_per_pack, purchase_price_pack, discount_percent, net_cost_pack, selling_price_pack, selling_price_unit, expiry_date, batch_number)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::date, $14)`,
-        pi.id,
-        pi.purchaseId,
-        pi.inventoryItemId,
-        pi.quantityPacks,
-        pi.bonusPacks,
-        pi.amortizeBonus,
-        pi.unitsPerPack,
-        pi.purchasePricePack,
-        pi.discountPercent,
-        pi.netCostPack,
-        pi.sellingPricePack,
-        pi.sellingPriceUnit,
-        pi.expiryDate,
-        pi.batchNumber,
-      );
-    }
-
-    // 5. Emit stock sync event to update CentralSearchIndex in background
+    // 4. Emit stock sync event to update CentralSearchIndex in background ONLY after transaction commits
     this.eventEmitter.emit('inventory.synced', {
       tenantId,
       schemaName,
-      medicineIds: processedMedicineIds,
+      medicineIds: transactionResult.processedMedicineIds,
     });
 
     this.logger.log(
-      `Bulk stock entry saved for tenant "${tenantId}". Purchase ID: ${purchaseId}. Total items: ${dto.items.length}`,
+      `Bulk stock entry saved for tenant "${tenantId}". Purchase ID: ${transactionResult.purchaseId}. Total items: ${dto.items.length}`,
     );
 
     return {
       success: true,
-      purchaseId,
+      purchaseId: transactionResult.purchaseId,
+      invoiceNumber: transactionResult.invoiceNumber,
       message: `تم اعتماد وحفظ فاتورة المشتريات بنجاح (${dto.items.length} مادة)`,
       invoiceSummary: {
         totalGross: invoiceGrossTotal,
@@ -1233,6 +1313,10 @@ END $$;`;
    * Search and trace a batch across stock and sales invoices
    */
   async getBatchTraceability(batchNumber: string) {
+    if (!batchNumber || batchNumber.trim().length === 0) {
+      throw new BadRequestException('رقم التشغيلة مطلوب لإتمام عملية البحث والتتبع');
+    }
+
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
@@ -1344,6 +1428,10 @@ END $$;`;
    * Set Recall (Block / Unblock) for a batch number
    */
   async setBatchRecall(batchNumber: string, isRecalled: boolean) {
+    if (!batchNumber || batchNumber.trim().length === 0) {
+      throw new BadRequestException('رقم التشغيلة مطلوب لتنفيذ إجراء السحب أو القفل');
+    }
+
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
@@ -1673,123 +1761,130 @@ END $$;`;
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
-    // 1. Fetch batch details
-    const batchRows: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT 
-        b.id,
-        b.batch_number as "batchNumber",
-        b.quantity_units_remaining as "quantityUnitsRemaining",
-        b.purchase_price_pack as "purchasePricePack",
-        b.supplier_id as "supplierId",
-        b.purchase_id as "purchaseId",
-        b.expiry_date as "expiryDate",
-        i.units_per_pack as "unitsPerPack",
-        COALESCE(i.custom_name, m.trade_name) as "tradeName",
-        s.name as "supplierName"
-      FROM "${schemaName}".inventory_batches b
-      JOIN "${schemaName}".inventory_items i ON b.inventory_item_id = i.id
-      LEFT JOIN public.medicines m ON i.medicine_id = m.id
-      LEFT JOIN "${schemaName}".suppliers s ON b.supplier_id = s.id
-      WHERE b.id = $1::uuid LIMIT 1;
-    `, batchId);
+    return this.prisma.$transaction(
+      async (tx) => {
+        // 1. Fetch batch details
+        const batchRows: any[] = await tx.$queryRawUnsafe(`
+          SELECT 
+            b.id,
+            b.batch_number as "batchNumber",
+            b.quantity_units_remaining as "quantityUnitsRemaining",
+            b.purchase_price_pack as "purchasePricePack",
+            b.supplier_id as "supplierId",
+            b.purchase_id as "purchaseId",
+            b.expiry_date as "expiryDate",
+            i.units_per_pack as "unitsPerPack",
+            COALESCE(i.custom_name, m.trade_name) as "tradeName",
+            s.name as "supplierName"
+          FROM "${schemaName}".inventory_batches b
+          JOIN "${schemaName}".inventory_items i ON b.inventory_item_id = i.id
+          LEFT JOIN public.medicines m ON i.medicine_id = m.id
+          LEFT JOIN "${schemaName}".suppliers s ON b.supplier_id = s.id
+          WHERE b.id = $1::uuid LIMIT 1;
+        `, batchId);
 
-    if (batchRows.length === 0) {
-      throw new NotFoundException('التشغيلة المحددة غير موجودة في المخزون');
-    }
+        if (batchRows.length === 0) {
+          throw new NotFoundException('التشغيلة المحددة غير موجودة في المخزون');
+        }
 
-    const batch = batchRows[0];
-    const qtyToReturn = Number(dto.quantityUnits);
+        const batch = batchRows[0];
+        const qtyToReturn = Number(dto.quantityUnits);
 
-    if (qtyToReturn > batch.quantityUnitsRemaining) {
-      throw new BadRequestException(`الكمية المراد إرجاعها (${qtyToReturn} وحدة) أكبر من المتوفر في الوجبة (${batch.quantityUnitsRemaining} وحدة)`);
-    }
+        if (qtyToReturn > batch.quantityUnitsRemaining) {
+          throw new BadRequestException(`الكمية المراد إرجاعها (${qtyToReturn} وحدة) أكبر من المتوفر في الوجبة (${batch.quantityUnitsRemaining} وحدة)`);
+        }
 
-    const unitsPerPack = batch.unitsPerPack || 1;
-    const packsReturned = qtyToReturn / unitsPerPack;
-    const unitPrice = dto.unitRefundPrice !== undefined ? Number(dto.unitRefundPrice) : (batch.purchasePricePack / unitsPerPack);
-    const refundTotal = Math.round(qtyToReturn * unitPrice);
+        const unitsPerPack = batch.unitsPerPack || 1;
+        const packsReturned = qtyToReturn / unitsPerPack;
+        const unitPrice = dto.unitRefundPrice !== undefined ? Number(dto.unitRefundPrice) : (batch.purchasePricePack / unitsPerPack);
+        const refundTotal = Math.round(qtyToReturn * unitPrice);
 
-    // 2. Deduct returned units from inventory batch
-    await this.prisma.$executeRawUnsafe(`
-      UPDATE "${schemaName}".inventory_batches
-      SET quantity_units_remaining = quantity_units_remaining - $1
-      WHERE id = $2::uuid;
-    `, qtyToReturn, batchId);
+        // 2. Deduct returned units from inventory batch
+        await tx.$executeRawUnsafe(`
+          UPDATE "${schemaName}".inventory_batches
+          SET quantity_units_remaining = quantity_units_remaining - $1
+          WHERE id = $2::uuid;
+        `, qtyToReturn, batchId);
 
-    const voucherNumber = `RET-SUPP-${Date.now().toString().slice(-6)}`;
-    const reason = dto.reason || 'إرجاع دواء للمذخر بسبب قرب انتهاء الصلاحية';
+        const voucherNumber = `RET-SUPP-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        const reason = dto.reason || 'إرجاع دواء للمذخر بسبب قرب انتهاء الصلاحية';
 
-    // 3. Record supplier ledger adjustment if supplier exists
-    if (batch.supplierId) {
-      // Record credit voucher in supplier_payments
-      await this.prisma.$executeRawUnsafe(`
-        INSERT INTO "${schemaName}".supplier_payments (
-          id, supplier_id, purchase_id, amount, payment_date, payment_method, receipt_number, notes, created_at
-        ) VALUES (
-          gen_random_uuid(), $1::uuid, $2::uuid, $3, CURRENT_DATE, 'RETURN_CREDIT', $4, $5, NOW()
-        );
-      `,
-        batch.supplierId,
-        batch.purchaseId || null,
-        refundTotal,
-        voucherNumber,
-        `سند إرجاع مواد للمذخر رقم ${voucherNumber} - دواء: ${batch.tradeName} (وجبة: ${batch.batchNumber}) - ${reason}`
-      );
+        // 3. Record supplier ledger adjustment if supplier exists
+        if (batch.supplierId) {
+          // Record credit voucher in supplier_payments
+          await tx.$executeRawUnsafe(`
+            INSERT INTO "${schemaName}".supplier_payments (
+              id, supplier_id, purchase_id, amount, payment_date, payment_method, receipt_number, notes, created_at
+            ) VALUES (
+              gen_random_uuid(), $1::uuid, $2::uuid, $3, CURRENT_DATE, 'RETURN_CREDIT', $4, $5, NOW()
+            );
+          `,
+            batch.supplierId,
+            batch.purchaseId || null,
+            refundTotal,
+            voucherNumber,
+            `سند إرجاع مواد للمذخر رقم ${voucherNumber} - دواء: ${batch.tradeName} (وجبة: ${batch.batchNumber}) - ${reason}`
+          );
 
-      // Deduct refund from unpaid purchases/invoices via FIFO:
-      // First try batch.purchaseId if it has debt, else all unpaid purchases of this supplier
-      const unpaidPurchases: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT id, remaining_amount, paid_amount
-         FROM "${schemaName}".purchases
-         WHERE supplier_id = $1::uuid AND remaining_amount > 0
-         ORDER BY CASE WHEN id = $2::uuid THEN 0 ELSE 1 END, created_at ASC`,
-        batch.supplierId,
-        batch.purchaseId || '00000000-0000-0000-0000-000000000000',
-      );
+          // Deduct refund from unpaid purchases/invoices via FIFO:
+          const unpaidPurchases: any[] = await tx.$queryRawUnsafe(
+            `SELECT id, remaining_amount, paid_amount
+             FROM "${schemaName}".purchases
+             WHERE supplier_id = $1::uuid AND remaining_amount > 0
+             ORDER BY CASE WHEN id = $2::uuid THEN 0 ELSE 1 END, created_at ASC`,
+            batch.supplierId,
+            batch.purchaseId || '00000000-0000-0000-0000-000000000000',
+          );
 
-      let remainingRefundToDeduct = refundTotal;
-      for (const p of unpaidPurchases) {
-        if (remainingRefundToDeduct <= 0) break;
-        const pRem = Number(p.remaining_amount || 0);
-        const deductAmt = Math.min(remainingRefundToDeduct, pRem);
-        const newRem = pRem - deductAmt;
-        const newStatus = newRem === 0 ? 'PAID' : 'PARTIAL';
+          let remainingRefundToDeduct = refundTotal;
+          for (const p of unpaidPurchases) {
+            if (remainingRefundToDeduct <= 0) break;
+            const pRem = Number(p.remaining_amount || 0);
+            const deductAmt = Math.min(remainingRefundToDeduct, pRem);
+            const newRem = pRem - deductAmt;
+            const newStatus = newRem === 0 ? 'PAID' : 'PARTIAL';
 
-        await this.prisma.$executeRawUnsafe(`
-          UPDATE "${schemaName}".purchases
-          SET remaining_amount = $1, payment_status = $2
-          WHERE id = $3::uuid;
-        `, newRem, newStatus, p.id);
+            await tx.$executeRawUnsafe(`
+              UPDATE "${schemaName}".purchases
+              SET remaining_amount = $1, payment_status = $2
+              WHERE id = $3::uuid;
+            `, newRem, newStatus, p.id);
 
-        try {
-          await this.prisma.$executeRawUnsafe(`
-            UPDATE "${schemaName}".purchase_invoices
-            SET remaining_amount = $1, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2::uuid;
-          `, newRem, p.id);
-        } catch {}
+            try {
+              await tx.$executeRawUnsafe(`
+                UPDATE "${schemaName}".purchase_invoices
+                SET remaining_amount = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = $2::uuid;
+              `, newRem, p.id);
+            } catch {}
 
-        remainingRefundToDeduct -= deductAmt;
-      }
-    }
+            remainingRefundToDeduct -= deductAmt;
+          }
+        }
 
-    return {
-      success: true,
-      message: `تم إرجاع ${packsReturned} علبة من الدواء (${batch.tradeName}) بنجاح وخصم مبلغ (${refundTotal.toLocaleString()} د.ع) من حساب المذخر`,
-      voucher: {
-        voucherNumber,
-        date: new Date().toISOString().slice(0, 10),
-        supplierName: batch.supplierName || 'المذخر الأصلي',
-        tradeName: batch.tradeName,
-        batchNumber: batch.batchNumber,
-        expiryDate: batch.expiryDate,
-        returnedUnits: qtyToReturn,
-        returnedPacks: packsReturned,
-        unitRefundPrice: unitPrice,
-        refundTotal,
-        reason,
+        return {
+          success: true,
+          message: `تم إرجاع ${packsReturned} علبة من الدواء (${batch.tradeName}) بنجاح وخصم مبلغ (${refundTotal.toLocaleString()} د.ع) من حساب المذخر`,
+          voucher: {
+            voucherNumber,
+            date: new Date().toISOString().slice(0, 10),
+            supplierName: batch.supplierName || 'المذخر الأصلي',
+            tradeName: batch.tradeName,
+            batchNumber: batch.batchNumber,
+            expiryDate: batch.expiryDate,
+            returnedUnits: qtyToReturn,
+            returnedPacks: packsReturned,
+            unitRefundPrice: unitPrice,
+            refundTotal,
+            reason,
+          },
+        };
       },
-    };
+      {
+        maxWait: 15000,
+        timeout: 45000,
+      }
+    );
   }
 
   /**

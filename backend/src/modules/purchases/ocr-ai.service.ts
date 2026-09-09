@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
+import { decryptSecret } from '../../common/utils/security.util';
 
 export interface ScannedInvoiceItem {
   rawName: string;
@@ -33,7 +34,7 @@ export interface DiscountTier {
 }
 
 export interface ScannedInvoiceResult {
-  invoiceNumber: string;
+  invoiceNumber?: string | null;
   supplierName: string;
   invoiceDate: string;
   totalAmount: number;
@@ -131,7 +132,15 @@ export class OcrAiService {
       select: { geminiApiKey: true, name: true, schemaName: true },
     });
 
-    const apiKey = tenant?.geminiApiKey?.trim() || process.env.GEMINI_API_KEY;
+    let rawKey = tenant?.geminiApiKey?.trim();
+    if (rawKey) {
+      try {
+        rawKey = decryptSecret(rawKey);
+      } catch {
+        // Fallback to existing
+      }
+    }
+    const apiKey = rawKey || process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       throw new BadRequestException(
@@ -375,7 +384,7 @@ export class OcrAiService {
     }
 
     return {
-      invoiceNumber: aiParsedData.invoiceNumber ? String(aiParsedData.invoiceNumber) : `INV-${Date.now().toString().slice(-6)}`,
+      invoiceNumber: aiParsedData.invoiceNumber ? String(aiParsedData.invoiceNumber).trim() : null,
       supplierName: aiParsedData.supplierName ? String(aiParsedData.supplierName) : 'مذخر أدوية',
       invoiceDate: aiParsedData.invoiceDate ? String(aiParsedData.invoiceDate) : new Date().toISOString().slice(0, 10),
       totalAmount: Number(aiParsedData.totalAmount) || calculatedTotal,

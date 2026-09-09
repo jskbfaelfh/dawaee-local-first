@@ -151,7 +151,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
       });
 
       if (response && response.items) {
-        setInvoiceNumber(response.invoiceNumber || `INV-${Date.now().toString().slice(-6)}`);
+        setInvoiceNumber(response.invoiceNumber || '');
         setSupplierName(response.supplierName || 'مذخر أدوية');
         setInvoiceDate(response.invoiceDate || new Date().toISOString().slice(0, 10));
 
@@ -380,10 +380,6 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
 
   // Final confirmation: Convert AI review to real purchase invoice in database
   const handleApproveInvoice = async (forceConfirm = false) => {
-    if (!invoiceNumber.trim()) {
-      setErrorMsg('يرجى إدخال رقم الفاتورة');
-      return;
-    }
     if (!supplierName.trim()) {
       setErrorMsg('يرجى إدخال اسم المذخر / المورد');
       return;
@@ -422,7 +418,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
 
     try {
       const payload = {
-        invoiceNumber: invoiceNumber.trim() || `INV-${Date.now().toString().slice(-6)}`,
+        invoiceNumber: invoiceNumber.trim() || undefined,
         supplierName: supplierName.trim(),
         invoiceDate: new Date(invoiceDate).toISOString().slice(0, 10),
         totalAmount: Math.round(totalInvoiceAmount),
@@ -680,7 +676,8 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                     type="text"
                     value={invoiceNumber}
                     onChange={(e) => setInvoiceNumber(e.target.value)}
-                    className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-bold font-mono text-slate-900 focus:bg-white focus:outline-hidden focus:border-emerald-500"
+                    placeholder="تلقائي (PUR-...) إذا تُرِك فارغاً"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl font-bold font-mono text-slate-900 focus:bg-white focus:outline-hidden focus:border-emerald-500 placeholder:text-slate-400 placeholder:font-sans"
                   />
                 </div>
                 <div>

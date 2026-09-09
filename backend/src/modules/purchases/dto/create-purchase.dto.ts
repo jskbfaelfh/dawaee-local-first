@@ -77,8 +77,8 @@ export class PurchaseItemDto {
 
 export class CreatePurchaseDto {
   @IsString()
-  @IsNotEmpty()
-  invoiceNumber!: string;
+  @IsOptional()
+  invoiceNumber?: string;
 
   @IsString()
   @IsOptional()

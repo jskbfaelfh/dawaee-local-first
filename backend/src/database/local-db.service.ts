@@ -49,8 +49,6 @@ export class LocalDbService implements OnModuleInit {
         last_error TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`,
-      `ALTER TABLE sync_queue ADD COLUMN retry_count INTEGER DEFAULT 0`,
-      `ALTER TABLE sync_queue ADD COLUMN last_error TEXT`,
     ];
 
     for (const sql of statements) {

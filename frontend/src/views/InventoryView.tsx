@@ -76,7 +76,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
     quantityPacks: 10,
     unitsPerPack: 1,
     shelfLocation: '',
-    batchNumber: 'BATCH-01',
+    batchNumber: '',
     expiryMonth: 12,
     expiryYear: new Date().getFullYear() + 2,
   });
@@ -251,7 +251,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
       quantityPacks: 10,
       unitsPerPack: defaultUnits,
       shelfLocation: history?.shelfLocation || '',
-      batchNumber: 'BATCH-01',
+      batchNumber: '',
       expiryMonth: history?.expiryMonth || 12,
       expiryYear: history?.expiryYear || currentYear + 2,
     });
@@ -276,7 +276,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
               purchasePricePack: Number(quickAddForm.purchasePricePack) || 0,
               expiryMonth: Number(quickAddForm.expiryMonth) || 12,
               expiryYear: Number(quickAddForm.expiryYear) || (new Date().getFullYear() + 2),
-              batchNumber: quickAddForm.batchNumber?.trim() || 'BATCH-01',
+              batchNumber: quickAddForm.batchNumber?.trim() || undefined,
               shelfLocation: quickAddForm.shelfLocation?.trim() || undefined,
             },
           ],
@@ -793,11 +793,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
                               (item.activeBatches || item.batches).slice(0, 2).map((b: any, idx: number) => (
                                 <button
                                   key={idx}
-                                  onClick={() => setSelectedTraceBatch(b.batchNumber)}
+                                  onClick={() => b.batchNumber && setSelectedTraceBatch(b.batchNumber)}
                                   className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-lg text-[10px] font-mono font-bold transition-all cursor-pointer"
-                                  title="انقر لتتبع رحلة هذه التشغيلة كاملة"
+                                  title={b.batchNumber ? "انقر لتتبع رحلة هذه التشغيلة كاملة" : "تشغيلة غير مسجلة"}
                                 >
-                                  #{b.batchNumber} {b.expiryFormatted && `(${b.expiryFormatted})`}
+                                  {b.batchNumber ? `#${b.batchNumber}` : <span className="font-sans font-normal text-slate-400">بدون تشغيلة</span>} {b.expiryFormatted && `(${b.expiryFormatted})`}
                                 </button>
                               ))
                             ) : Number(item.expiredUnitsRemaining || 0) > 0 ? (
@@ -1150,7 +1150,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
                   <div key={b.id} className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between text-xs">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
-                        <b className="font-mono text-sm text-slate-900 font-black">#{b.batchNumber}</b>
+                        <b className="font-mono text-sm text-slate-900 font-black">{b.batchNumber ? `#${b.batchNumber}` : <span className="font-sans font-normal text-slate-400 text-xs">بدون تشغيلة</span>}</b>
                         {b.isBonus && (
                           <span className="px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-md text-[10px] font-black">
                             🎁 وجبة بونص

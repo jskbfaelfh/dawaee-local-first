@@ -994,10 +994,10 @@ export const BulkStockEntryView: React.FC = () => {
                                   <label className="text-slate-600 block text-[9px]">رقم التشغيلة:</label>
                                   <input
                                     type="text"
-                                    value={row.bonusBatchNumber ?? (row.batchNumber ? `${row.batchNumber}-BONUS` : 'BN-BONUS')}
+                                    value={row.bonusBatchNumber ?? (row.batchNumber ? `${row.batchNumber}-BONUS` : '')}
                                     onChange={(e) => updateRowField(row.tempId, 'bonusBatchNumber', e.target.value)}
                                     className="w-full px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded text-[10px] font-mono"
-                                    placeholder="تشغيلة البونص"
+                                    placeholder="تشغيلة البونص (اختياري)"
                                   />
                                 </div>
                                 <div>

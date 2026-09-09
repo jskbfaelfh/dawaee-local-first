@@ -81,13 +81,27 @@ export function maskSecretKey(secret?: string | null): string {
   return '••••••••••••' + tail;
 }
 
+let devVaultKey: Buffer | null = null;
+
 /**
  * Symmetric Encryption at Rest using AES-256-GCM
  * Used for securing R2 credentials, Gemini API Keys, and other database secrets.
  */
-function getVaultKey(): Buffer {
-  const secret = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET || getOrGenerateDevJwtSecret();
-  return crypto.scryptSync(secret, 'dawaee-vault-salt-2026', 32);
+export function getVaultKey(): Buffer {
+  if (process.env.ENCRYPTION_KEY && process.env.ENCRYPTION_KEY.trim().length >= 32) {
+    return crypto.scryptSync(process.env.ENCRYPTION_KEY.trim(), 'dawaee-vault-salt-2026', 32);
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL SECURITY ERROR: ENCRYPTION_KEY is required in production and must be at least 32 characters.');
+  }
+
+  // In development, generate and maintain dedicated in-memory vault key
+  if (!devVaultKey) {
+    devVaultKey = crypto.randomBytes(32);
+    logger.warn('⚠️ Using generated in-memory ENCRYPTION_KEY for development. Set ENCRYPTION_KEY in .env for persistent secrets.');
+  }
+  return devVaultKey;
 }
 
 /**
@@ -113,7 +127,7 @@ export function encryptSecret(plaintext?: string | null): string {
     return `enc:v1:${iv.toString('hex')}:${authTag}:${encrypted}`;
   } catch (err: any) {
     logger.error(`Encryption error: ${err.message}`);
-    return plaintext;
+    throw new Error(`فشل تشفير البيانات الحساسة بشكل آمن: ${err.message}`);
   }
 }
 
@@ -126,14 +140,18 @@ export function decryptSecret(ciphertext?: string | null): string {
   const trimmed = ciphertext.trim();
   if (!trimmed) return '';
   if (!trimmed.startsWith('enc:v1:')) {
-    // Legacy plaintext string
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('CRITICAL: Plaintext secret detected in production environment.');
+      throw new Error('فشل أمني: غير مسموح بقراءة أسرار غير مشفرة في بيئة الإنتاج.');
+    }
+    logger.warn('⚠️ Security Notice: Reading unencrypted legacy secret. Re-save or run migration to enforce AES-256-GCM encryption.');
     return trimmed;
   }
 
   try {
     const parts = trimmed.split(':');
     if (parts.length !== 5) {
-      return trimmed;
+      throw new Error('Invalid encrypted ciphertext format');
     }
     const [, , ivHex, tagHex, encryptedHex] = parts;
     const key = getVaultKey();
@@ -147,7 +165,7 @@ export function decryptSecret(ciphertext?: string | null): string {
     return decrypted;
   } catch (err: any) {
     logger.error(`Decryption error: ${err.message}`);
-    return '';
+    throw new Error(`فشل فك تشفير البيانات الحساسة: ${err.message}`);
   }
 }
 
@@ -164,8 +182,23 @@ export function sanitizeTenantResponse(tenant: any): any {
     ...safe
   } = tenant;
 
-  const decryptedAccessKey = safe.r2AccessKeyId ? decryptSecret(safe.r2AccessKeyId) : null;
-  const decryptedAccountId = safe.r2AccountId ? decryptSecret(safe.r2AccountId) : null;
+  let decryptedAccessKey: string | null = null;
+  if (safe.r2AccessKeyId) {
+    try {
+      decryptedAccessKey = decryptSecret(safe.r2AccessKeyId);
+    } catch {
+      decryptedAccessKey = safe.r2AccessKeyId;
+    }
+  }
+
+  let decryptedAccountId: string | null = null;
+  if (safe.r2AccountId) {
+    try {
+      decryptedAccountId = decryptSecret(safe.r2AccountId);
+    } catch {
+      decryptedAccountId = safe.r2AccountId;
+    }
+  }
 
   return {
     ...safe,
@@ -217,6 +250,14 @@ export function validateStartupSecurity() {
       );
     }
 
+    // 3. Production Encryption Key checks
+    const encKey = process.env.ENCRYPTION_KEY;
+    if (!encKey || encKey.trim().length < 32) {
+      throw new Error(
+        'CRITICAL SECURITY FATAL: In production, ENCRYPTION_KEY must be configured in environment variables and be at least 32 characters long to secure database secrets at rest.',
+      );
+    }
+
     if (!adminUser || adminUser === 'superadmin') {
       logger.warn('SECURITY RECOMMENDATION: In production, consider changing ADMIN_USERNAME from default "superadmin".');
     }
@@ -230,6 +271,11 @@ export function validateStartupSecurity() {
     if (!adminPass || adminPass === INSECURE_DEFAULT_ADMIN) {
       logger.warn(
         '⚠️ SECURITY WARNING: Default or missing ADMIN_PASSWORD in development. Ensure you set a strong secret in production environment variables (e.g. on Railway/Vercel).',
+      );
+    }
+    if (!process.env.ENCRYPTION_KEY) {
+      logger.warn(
+        '⚠️ SECURITY WARNING: Missing ENCRYPTION_KEY in development. Using generated in-memory key. Set ENCRYPTION_KEY in your local .env for persistent secrets.',
       );
     }
   }

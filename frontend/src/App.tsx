@@ -704,6 +704,24 @@ export const App: React.FC = () => {
           </div>
         </header>
 
+        {/* Read-Only Expired Subscription Notice Banner */}
+        {currentPharmacy?.subscriptionStatus === 'EXPIRED' && currentUser?.role !== 'SUPER_ADMIN' && (
+          <div className="bg-amber-500/10 border-b border-amber-500/30 px-3 sm:px-5 py-2.5 flex items-center justify-between gap-3 shrink-0 text-amber-950 dark:text-amber-200">
+            <div className="flex items-center gap-2 min-w-0 text-xs sm:text-sm font-bold">
+              <span className="text-base sm:text-lg shrink-0">⚠️</span>
+              <span className="truncate">
+                اشتراك الصيدلية منتهي — النظام حالياً في <strong className="font-black text-amber-700 dark:text-amber-400">وضع القراءة فقط (Read-Only)</strong>. يمكنك استعراض السجلات والمخزون، وتتطلب إضافة عمليات جديدة تجديد الاشتراك.
+              </span>
+            </div>
+            <button
+              onClick={() => navigateToTab('PROFILE')}
+              className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black shrink-0 transition-all cursor-pointer shadow-xs"
+            >
+              تجديد الآن
+            </button>
+          </div>
+        )}
+
         {/* Dynamic View Component with Independent Smooth Scroll */}
         <main className="flex-1 overflow-y-auto p-2 sm:p-5 w-full max-w-full overflow-x-hidden">
           {activeTab === 'POS' && <PosView />}

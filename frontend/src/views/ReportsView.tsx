@@ -3107,7 +3107,7 @@ export const ReportsView: React.FC = () => {
             batchId: returnBatchItem.inventoryItemId,
             tradeName: returnBatchItem.tradeName,
             scientificName: returnBatchItem.scientificName,
-            batchNumber: returnBatchItem.oldestBatchNumber || 'BATCH-OLD',
+            batchNumber: returnBatchItem.oldestBatchNumber || '',
             expiryDate: returnBatchItem.earliestExpiry || '',
             expiryFormatted: returnBatchItem.expiryFormatted,
             quantityUnitsRemaining: returnBatchItem.totalUnitsRemaining,

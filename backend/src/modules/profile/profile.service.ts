@@ -9,7 +9,7 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
-import { maskSecretKey, isWeakPassword } from '../../common/utils/security.util';
+import { maskSecretKey, isWeakPassword, encryptSecret, decryptSecret } from '../../common/utils/security.util';
 import {
   UpdatePharmacyProfileDto,
   ChangeOwnerPasswordDto,
@@ -84,7 +84,7 @@ export class ProfileService {
         showWhatsapp: (tenant as any).showWhatsapp ?? true,
         is24Hours: (tenant as any).is24Hours ?? false,
         hasGeminiApiKey: Boolean((tenant as any).geminiApiKey),
-        geminiApiKeyMasked: maskSecretKey((tenant as any).geminiApiKey),
+        geminiApiKeyMasked: maskSecretKey(decryptSecret((tenant as any).geminiApiKey)),
         geminiApiKey: '', // Sensitive secret NEVER returned to frontend!
         licenseKey: maskSecretKey(tenant.licenseKey),
         licenseKeyMasked: maskSecretKey(tenant.licenseKey),
@@ -123,7 +123,7 @@ export class ProfileService {
       const raw = dto.geminiApiKey?.trim();
       if (raw && !raw.includes('••••') && !raw.startsWith('•••')) {
         // New valid key provided
-        updateData.geminiApiKey = raw;
+        updateData.geminiApiKey = encryptSecret(raw);
       } else if (raw === '' || raw === '__REMOVE__') {
         // Explicit removal
         updateData.geminiApiKey = null;
@@ -159,7 +159,7 @@ export class ProfileService {
       ...updated,
       geminiApiKey: '',
       hasGeminiApiKey: Boolean((updated as any).geminiApiKey),
-      geminiApiKeyMasked: maskSecretKey((updated as any).geminiApiKey),
+      geminiApiKeyMasked: maskSecretKey(decryptSecret((updated as any).geminiApiKey)),
       licenseKey: maskSecretKey(updated.licenseKey),
       licenseKeyMasked: maskSecretKey(updated.licenseKey),
     };

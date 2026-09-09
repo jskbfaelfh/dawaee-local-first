@@ -58,7 +58,7 @@ export class AdminController {
     return this.adminService.addBranchToTenant(id, dto);
   }
 
-  @Post('chains/link-tenants')
+  @Post(['chains/link-tenants', 'chains/link'])
   async linkTenantsIntoChain(@Body() dto: LinkTenantsDto) {
     return this.adminService.linkTenantsIntoChain(dto);
   }

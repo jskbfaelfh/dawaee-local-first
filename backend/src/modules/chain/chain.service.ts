@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Logger,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
 import {
@@ -224,6 +225,34 @@ export class ChainService {
       },
     });
 
+    // 4. Proactively synchronize HQ Owner accounts into the newly linked branch
+    try {
+      const hqOwners: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT id, name, username, password_hash, role, is_active FROM "${currentTenant.schemaName}".users WHERE role = 'OWNER';`
+      );
+      for (const hqOwner of hqOwners) {
+        const existing: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id FROM "${targetTenant.schemaName}".users WHERE id = $1::uuid OR username = $2 LIMIT 1;`,
+          hqOwner.id,
+          hqOwner.username,
+        );
+        if (existing.length === 0) {
+          await this.prisma.$executeRawUnsafe(
+            `INSERT INTO "${targetTenant.schemaName}".users 
+             (id, name, username, password_hash, role, is_active, created_at)
+             VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
+            hqOwner.id,
+            hqOwner.name,
+            hqOwner.username,
+            hqOwner.password_hash,
+          );
+        }
+      }
+      this.logger.log(`Synchronized ${hqOwners.length} HQ Owner(s) into branch "${targetTenant.name}"`);
+    } catch (err: any) {
+      this.logger.warn(`Could not sync HQ owners to branch ${targetTenant.name}: ${err.message}`);
+    }
+
     this.logger.log(`Branch "${targetTenant.name}" linked successfully to chain ${chainId}`);
 
     return {
@@ -433,7 +462,7 @@ export class ChainService {
       }
 
       // 4. Create StockTransfer record in Master DB with batchAllocations
-      const transferNumber = `TRF-${Date.now().toString().slice(-6)}`;
+      const transferNumber = `TRF-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
       const transfer = await tx.stockTransfer.create({
         data: {
           transferNumber,
@@ -461,7 +490,7 @@ export class ChainService {
         message: `تم إنشاء سند المناقلة رقم (${transferNumber}) وإرسال الشحنة إلى (${targetTenant.name}) بنجاح`,
         transfer,
       };
-    });
+    }, { timeout: 60000, maxWait: 15000 });
   }
 
   /**
@@ -545,14 +574,14 @@ export class ChainService {
         ? (transfer.batchAllocations as any[])
         : [{
             batchId: undefined,
-            batchNumber: transfer.batchNumber || `TRF-${transfer.transferNumber}`,
+            batchNumber: transfer.batchNumber || null,
             expiryDate: transfer.expiryDate,
             units: transfer.quantityUnits,
             purchasePricePack: Number(transfer.purchasePricePack || 0),
           }];
 
       for (const alloc of allocations) {
-        const bNumber = alloc.batchNumber || transfer.batchNumber || `TRF-${transfer.transferNumber}`;
+        const bNumber = alloc.batchNumber || transfer.batchNumber || null;
         const expiryStr = alloc.expiryDate 
           ? (typeof alloc.expiryDate === 'string' ? alloc.expiryDate.slice(0, 10) : new Date(alloc.expiryDate).toISOString().slice(0, 10))
           : (transfer.expiryDate ? new Date(transfer.expiryDate).toISOString().slice(0, 10) : '2028-12-31');
@@ -596,7 +625,7 @@ export class ChainService {
         message: `تم استلام الشحنة (${transfer.quantityPacks} علبة من ${transfer.tradeName}) بنجاح وإضافتها إلى مخزون الرفوف`,
         transfer: updatedTransfer,
       };
-    });
+    }, { timeout: 60000, maxWait: 15000 });
   }
 
   /**
@@ -640,7 +669,7 @@ export class ChainService {
           ? (transfer.batchAllocations as any[])
           : [{
               batchId: undefined,
-              batchNumber: transfer.batchNumber || 'TRANSFER',
+              batchNumber: transfer.batchNumber || null,
               expiryDate: transfer.expiryDate,
               units: transfer.quantityUnits,
               purchasePricePack: Number(transfer.purchasePricePack || 0),
@@ -688,7 +717,7 @@ export class ChainService {
 
           // C. Fallback: recreate batch if missing
           if (!refunded) {
-            const bNum = alloc.batchNumber || 'CANCELLED-REFUND';
+            const bNum = alloc.batchNumber || transfer.batchNumber || null;
             const bExpiry = alloc.expiryDate 
               ? (typeof alloc.expiryDate === 'string' ? alloc.expiryDate.slice(0, 10) : new Date(alloc.expiryDate).toISOString().slice(0, 10))
               : (transfer.expiryDate ? new Date(transfer.expiryDate).toISOString().slice(0, 10) : null);
@@ -720,7 +749,7 @@ export class ChainService {
         success: true,
         message: 'تم إلغاء سند المناقلة وإعادة الكميات لمخزون الفرع بنجاح',
       };
-    });
+    }, { timeout: 60000, maxWait: 15000 });
   }
 
   /**

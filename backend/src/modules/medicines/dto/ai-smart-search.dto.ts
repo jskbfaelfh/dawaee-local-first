@@ -1,11 +1,11 @@
-import { IsString, IsNotEmpty, IsOptional, IsBoolean } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, IsBoolean } from 'class-validator';
 
 export class AiSmartSearchDto {
-  @IsString()
-  @IsNotEmpty({ message: 'يرجى إدخال نص الاستفسار أو الحديث الصوتي' })
-  query!: string;
+  @IsString({ message: 'نص البحث يجب أن يكون نصاً صالحاً' })
+  @IsNotEmpty({ message: 'يرجى إدخال نص البحث المطلوب' })
+  query: string;
 
-  @IsBoolean()
   @IsOptional()
+  @IsBoolean()
   inStockOnly?: boolean;
 }

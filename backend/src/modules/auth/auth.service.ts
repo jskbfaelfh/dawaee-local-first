@@ -97,26 +97,8 @@ export class AuthService {
       },
     ];
 
-    if (user.role === 'OWNER' && tenant.chainId) {
-      const memberTenants = await this.prisma.tenant.findMany({
-        where: {
-          chainId: tenant.chainId,
-          subscriptionStatus: { not: 'SUSPENDED' },
-        },
-        orderBy: { createdAt: 'asc' },
-      });
-
-      if (memberTenants.length > 0) {
-        branches = memberTenants.map((t) => ({
-          id: t.id,
-          name: t.name,
-          slug: t.slug,
-          governorate: t.governorate,
-          district: t.district,
-          phone: t.phone,
-          isCurrent: t.id === tenant.id,
-        }));
-      }
+    if (tenant.chainId) {
+      branches = await this.getAuthorizedBranches(tenant.chainId, tenant, user);
     }
 
     return {
@@ -141,10 +123,164 @@ export class AuthService {
     };
   }
 
-  async switchBranch(targetTenantId: string, currentTenantId: string, currentUserRole: string) {
-    if (currentUserRole !== 'OWNER') {
-      throw new ForbiddenException('فقط مالك الصيدلية يمتلك صلاحية التبديل بين الفروع');
+  /**
+   * Check if a user is the Master Chain Owner (HQ Owner) for a given chain.
+   */
+  private async isChainMasterOwner(
+    chainId: string,
+    currentTenant: any,
+    user: { id: string; username: string; role: string; name?: string },
+  ): Promise<boolean> {
+    if (user.role !== 'OWNER') {
+      return false;
     }
+
+    // 1. If the user is an OWNER directly in the HQ tenant
+    if (currentTenant.chainRole === 'HQ') {
+      return true;
+    }
+
+    // 2. Look up the HQ tenant for this chain
+    const hqTenant = await this.prisma.tenant.findFirst({
+      where: {
+        chainId: chainId,
+        chainRole: 'HQ',
+      },
+    });
+
+    if (!hqTenant) {
+      // If no tenant is explicitly designated as HQ, the first created tenant is HQ
+      const firstTenant = await this.prisma.tenant.findFirst({
+        where: { chainId: chainId },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (firstTenant && firstTenant.id === currentTenant.id) {
+        return true;
+      }
+      return false;
+    }
+
+    if (hqTenant.id === currentTenant.id) {
+      return true;
+    }
+
+    // 3. Check if this user exists as an active OWNER in the HQ tenant's schema
+    try {
+      const hqOwners: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT id, username, role, is_active 
+         FROM "${hqTenant.schemaName}".users 
+         WHERE (id = $1::uuid OR username = $2) AND role = 'OWNER' AND is_active = TRUE
+         LIMIT 1;`,
+        user.id,
+        user.username,
+      );
+      if (hqOwners.length > 0) {
+        return true;
+      }
+    } catch (err: any) {
+      this.logger.warn(
+        `Could not verify HQ owner status in schema ${hqTenant.schemaName}: ${err.message}`,
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * Get authorized branches for a user within a chain.
+   */
+  private async getAuthorizedBranches(
+    chainId: string,
+    currentTenant: any,
+    user: { id: string; username: string; role: string; name?: string },
+  ) {
+    const memberTenants = await this.prisma.tenant.findMany({
+      where: {
+        chainId: chainId,
+        subscriptionStatus: { not: 'SUSPENDED' },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (memberTenants.length === 0) {
+      return [
+        {
+          id: currentTenant.id,
+          name: currentTenant.name,
+          slug: currentTenant.slug,
+          governorate: currentTenant.governorate,
+          district: currentTenant.district,
+          phone: currentTenant.phone,
+          isCurrent: true,
+        },
+      ];
+    }
+
+    const isMaster = await this.isChainMasterOwner(chainId, currentTenant, user);
+
+    if (isMaster) {
+      // Master owner has access to all non-suspended branches
+      return memberTenants.map((t) => ({
+        id: t.id,
+        name: t.name,
+        slug: t.slug,
+        governorate: t.governorate,
+        district: t.district,
+        phone: t.phone,
+        isCurrent: t.id === currentTenant.id,
+      }));
+    }
+
+    // For non-master users, filter branches where the user actually has an active account
+    const authorizedBranches: any[] = [];
+    for (const t of memberTenants) {
+      if (t.id === currentTenant.id) {
+        authorizedBranches.push({
+          id: t.id,
+          name: t.name,
+          slug: t.slug,
+          governorate: t.governorate,
+          district: t.district,
+          phone: t.phone,
+          isCurrent: true,
+        });
+        continue;
+      }
+
+      try {
+        const matchingUsers: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id, role, is_active FROM "${t.schemaName}".users 
+           WHERE (id = $1::uuid OR username = $2) AND is_active = TRUE
+           LIMIT 1;`,
+          user.id,
+          user.username,
+        );
+        if (matchingUsers.length > 0) {
+          authorizedBranches.push({
+            id: t.id,
+            name: t.name,
+            slug: t.slug,
+            governorate: t.governorate,
+            district: t.district,
+            phone: t.phone,
+            isCurrent: false,
+          });
+        }
+      } catch {
+        // Schema query error, skip
+      }
+    }
+
+    return authorizedBranches;
+  }
+
+  async switchBranch(targetTenantId: string, currentUser: any) {
+    if (!currentUser) {
+      throw new UnauthorizedException('بيانات المستخدم مفقودة');
+    }
+
+    const currentUserId = currentUser.sub || currentUser.id || currentUser.userId;
+    const currentTenantId = currentUser.tenantId;
 
     const currentTenant = await this.prisma.tenant.findUnique({
       where: { id: currentTenantId },
@@ -175,17 +311,148 @@ export class AuthService {
       throw new ForbiddenException('الفرع المطلوب ليس مسجلاً ضمن سلسلة فروعك');
     }
 
-    // Fetch owner user in target tenant schema
-    const targetUsers: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT id, name, username, role, is_active FROM "${targetTenant.schemaName}".users WHERE role = 'OWNER' LIMIT 1;
-    `);
+    // Fetch the actual current user (User A) from current tenant schema
+    const currentDbUsers: any[] = await this.prisma.$queryRawUnsafe(
+      `SELECT id, name, username, password_hash, role, is_active 
+       FROM "${currentTenant.schemaName}".users 
+       WHERE id = $1::uuid LIMIT 1;`,
+      currentUserId,
+    );
 
-    const ownerUser = targetUsers[0] || {
-      id: 'owner-switch',
-      name: targetTenant.name,
-      username: 'owner',
-      role: 'OWNER',
-    };
+    if (currentDbUsers.length === 0) {
+      throw new NotFoundException('تعذر العثور على بيانات المستخدم الحالي في الصيدلية الحالية');
+    }
+    const userA = currentDbUsers[0];
+
+    if (!userA.is_active) {
+      throw new ForbiddenException('حسابك الحالي معطل');
+    }
+
+    // Check if current user is the Master Chain Owner (HQ Owner)
+    const isMaster = await this.isChainMasterOwner(
+      currentTenant.chainId,
+      currentTenant,
+      userA,
+    );
+
+    let targetUser: { id: string; name: string; username: string; role: string };
+
+    if (isMaster) {
+      // 1. Chain Master Owner: Authorized across all branches in the chain
+      // Maintain user's exact identity in target schema
+      const targetUsersById: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT id, name, username, role, is_active 
+         FROM "${targetTenant.schemaName}".users 
+         WHERE id = $1::uuid LIMIT 1;`,
+        userA.id,
+      );
+
+      if (targetUsersById.length > 0) {
+        await this.prisma.$executeRawUnsafe(
+          `UPDATE "${targetTenant.schemaName}".users 
+           SET name = $1, role = 'OWNER', is_active = TRUE 
+           WHERE id = $2::uuid;`,
+          userA.name,
+          userA.id,
+        );
+        targetUser = {
+          id: userA.id,
+          name: userA.name,
+          username: targetUsersById[0].username,
+          role: 'OWNER',
+        };
+      } else {
+        const targetUsersByUsername: any[] = await this.prisma.$queryRawUnsafe(
+          `SELECT id, name, username, role, is_active 
+           FROM "${targetTenant.schemaName}".users 
+           WHERE username = $1 LIMIT 1;`,
+          userA.username,
+        );
+
+        if (targetUsersByUsername.length > 0) {
+          if (targetUsersByUsername[0].role === 'OWNER') {
+            await this.prisma.$executeRawUnsafe(
+              `UPDATE "${targetTenant.schemaName}".users 
+               SET name = $1, role = 'OWNER', is_active = TRUE 
+               WHERE id = $2::uuid;`,
+              userA.name,
+              targetUsersByUsername[0].id,
+            );
+            targetUser = {
+              id: targetUsersByUsername[0].id,
+              name: userA.name,
+              username: targetUsersByUsername[0].username,
+              role: 'OWNER',
+            };
+          } else {
+            const distinctUsername = `${userA.username}_chain`;
+            await this.prisma.$executeRawUnsafe(
+              `INSERT INTO "${targetTenant.schemaName}".users 
+               (id, name, username, password_hash, role, is_active, created_at)
+               VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
+              userA.id,
+              userA.name,
+              distinctUsername,
+              userA.password_hash,
+            );
+            targetUser = {
+              id: userA.id,
+              name: userA.name,
+              username: distinctUsername,
+              role: 'OWNER',
+            };
+          }
+        } else {
+          // Provision Chain Master Owner into the branch schema
+          await this.prisma.$executeRawUnsafe(
+            `INSERT INTO "${targetTenant.schemaName}".users 
+             (id, name, username, password_hash, role, is_active, created_at)
+             VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW());`,
+            userA.id,
+            userA.name,
+            userA.username,
+            userA.password_hash,
+          );
+          targetUser = {
+            id: userA.id,
+            name: userA.name,
+            username: userA.username,
+            role: 'OWNER',
+          };
+        }
+      }
+    } else {
+      // 2. Non-Master User (Local branch user / manager):
+      // STRICT AUTHORIZATION: Must already exist and be active in target schema!
+      const targetExisting: any[] = await this.prisma.$queryRawUnsafe(
+        `SELECT id, name, username, role, is_active 
+         FROM "${targetTenant.schemaName}".users 
+         WHERE (id = $1::uuid OR username = $2)
+         LIMIT 1;`,
+        userA.id,
+        userA.username,
+      );
+
+      if (targetExisting.length === 0) {
+        this.logger.warn(
+          `Security Alert: Unauthorized branch switch attempt by user "${userA.username}" from "${currentTenant.name}" to "${targetTenant.name}" (not assigned to target branch)`,
+        );
+        throw new ForbiddenException(
+          'ليس لديك صلاحية الوصول إلى هذا الفرع. التبديل متاح فقط لمالك السلسلة (HQ) أو المستخدمين المصرح لهم في هذا الفرع',
+        );
+      }
+
+      if (!targetExisting[0].is_active) {
+        throw new ForbiddenException('حسابك في هذا الفرع معطل، يرجى التواصل مع إدارة الصيدلية');
+      }
+
+      targetUser = {
+        id: targetExisting[0].id,
+        name: targetExisting[0].name,
+        username: targetExisting[0].username,
+        role: targetExisting[0].role,
+      };
+    }
 
     // Check target subscription status
     const now = new Date();
@@ -198,12 +465,12 @@ export class AuthService {
       });
     }
 
-    // Generate new JWT
+    // Generate new JWT retaining authentic user identity and role
     const payload = {
-      sub: ownerUser.id,
-      name: ownerUser.name,
-      username: ownerUser.username,
-      role: 'OWNER',
+      sub: targetUser.id,
+      name: targetUser.name,
+      username: targetUser.username,
+      role: targetUser.role,
       tenantId: targetTenant.id,
       schemaName: targetTenant.schemaName,
       subscriptionStatus: currentStatus,
@@ -211,34 +478,26 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
 
-    // Get all branches in the chain
-    const memberTenants = await this.prisma.tenant.findMany({
-      where: {
-        chainId: targetTenant.chainId,
-        subscriptionStatus: { not: 'SUSPENDED' },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
+    // Get list of authorized branches for this user
+    const branches = await this.getAuthorizedBranches(
+      targetTenant.chainId,
+      targetTenant,
+      targetUser,
+    );
 
-    const branches = memberTenants.map((t) => ({
-      id: t.id,
-      name: t.name,
-      slug: t.slug,
-      governorate: t.governorate,
-      district: t.district,
-      phone: t.phone,
-      isCurrent: t.id === targetTenant.id,
-    }));
+    this.logger.log(
+      `Branch switched: User "${targetUser.name}" (${targetUser.username}, role: ${targetUser.role}) switched from branch "${currentTenant.name}" to "${targetTenant.name}"`,
+    );
 
     return {
       success: true,
       message: `تم التبديل بنجاح إلى فرع (${targetTenant.name})`,
       accessToken,
       user: {
-        id: ownerUser.id,
-        name: ownerUser.name,
-        username: ownerUser.username,
-        role: 'OWNER',
+        id: targetUser.id,
+        name: targetUser.name,
+        username: targetUser.username,
+        role: targetUser.role,
       },
       pharmacy: {
         id: targetTenant.id,

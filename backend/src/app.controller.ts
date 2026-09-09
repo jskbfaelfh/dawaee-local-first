@@ -24,7 +24,7 @@ export class AppController {
     try {
       await Promise.race([
         this.prisma.$queryRawUnsafe('SELECT 1'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('DB Timeout')), 2000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('DB Timeout')), 5000)),
       ]);
       return {
         status: 'ok',

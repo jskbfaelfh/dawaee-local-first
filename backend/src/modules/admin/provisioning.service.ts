@@ -33,16 +33,22 @@ export class ProvisioningService {
     const schemaName = `ph_${safeSlug}_${randSuffix}`;
 
     // 1. Validate & Hash Password for Owner BEFORE doing any DDL
-    const rawOwnerPass = dto.ownerPassword ? dto.ownerPassword.trim() : generateSecurePassword(14, 'Own-');
-    const weakOwner = isWeakPassword(rawOwnerPass);
-    if (weakOwner.isWeak) {
-      throw new BadRequestException(weakOwner.reason || 'كلمة مرور المالك ضعيفة جداً');
+    const saltRounds = 10;
+    let passwordHash = dto.ownerPasswordHash;
+    let rawOwnerPass = dto.ownerPassword ? dto.ownerPassword.trim() : '';
+
+    if (!passwordHash) {
+      if (!rawOwnerPass) {
+        rawOwnerPass = generateSecurePassword(14, 'Own-');
+      }
+      const weakOwner = isWeakPassword(rawOwnerPass);
+      if (weakOwner.isWeak) {
+        throw new BadRequestException(weakOwner.reason || 'كلمة مرور المالك ضعيفة جداً');
+      }
+      passwordHash = await bcrypt.hash(rawOwnerPass, saltRounds);
     }
 
-    const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(rawOwnerPass, saltRounds);
-    const ownerUserId = crypto.randomUUID();
-
+    const ownerUserId = dto.ownerUserId || crypto.randomUUID();
     const cleanOwnerUsername = (dto.ownerUsername || 'user').toLowerCase().trim().replace(/\s+/g, '_');
     const cleanOwnerName = (dto.ownerName || 'مدير الصيدلية').trim();
 
@@ -161,7 +167,7 @@ export class ProvisioningService {
           userId: ownerUserId,
           name: dto.ownerName,
           username: cleanOwnerUsername,
-          password: rawOwnerPass,
+          ...(rawOwnerPass ? { password: rawOwnerPass } : {}),
           role: 'OWNER',
         },
         cashierAccounts: cashierAccounts.map(({ id, name, username, password }) => ({
@@ -178,6 +184,19 @@ export class ProvisioningService {
               username: cashierAccounts[0].username,
               password: cashierAccounts[0].password,
               role: 'CASHIER',
+            }
+          : null,
+        oneTimeCredentials: rawOwnerPass
+          ? {
+              owner: {
+                username: cleanOwnerUsername,
+                password: rawOwnerPass,
+              },
+              cashiers: cashierAccounts.map(({ username, password, name }) => ({
+                username,
+                password,
+                name,
+              })),
             }
           : null,
         chainId: result.chainId,

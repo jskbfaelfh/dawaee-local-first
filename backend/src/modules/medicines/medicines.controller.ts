@@ -15,6 +15,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { MedicinesService } from './medicines.service';
 import { CreateMedicineDto, QueryMedicineDto } from './dto/create-medicine.dto';
+import { AiSmartSearchDto } from './dto/ai-smart-search.dto';
 
 @Controller('medicines')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -87,14 +88,8 @@ export class MedicinesController {
 
   @Post('ai-smart-search')
   @HttpCode(HttpStatus.OK)
-  async aiSmartSearch(
-    @Body() body: { query: string; inStockOnly?: boolean },
-    @Param() _params: any,
-    @Query() _query: any,
-    @Body() _body: any,
-  ) {
-    // Note: Request user context is extracted via MedicinesService using TenantContext or Prisma
-    return this.medicinesService.aiSmartSearch(body.query, body.inStockOnly);
+  async aiSmartSearch(@Body() dto: AiSmartSearchDto) {
+    return this.medicinesService.aiSmartSearch(dto.query, dto.inStockOnly);
   }
 
   @Post('seed')

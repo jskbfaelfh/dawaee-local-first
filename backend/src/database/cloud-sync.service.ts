@@ -249,7 +249,7 @@ export class CloudSyncService implements OnModuleInit {
          selling_price_unit = COALESCE(EXCLUDED.selling_price_unit, "${schema}".inventory_batches.selling_price_unit)`,
       batchId,
       batch.inventoryItemId || batch.inventory_item_id,
-      batch.batchNumber || batch.batch_number || 'SYNC-BATCH',
+      batch.batchNumber || batch.batch_number || null,
       Number(batch.purchasePricePack || batch.purchase_price_pack || 0),
       batch.sellingPricePack != null ? Number(batch.sellingPricePack) : null,
       batch.sellingPriceUnit != null ? Number(batch.sellingPriceUnit) : null,

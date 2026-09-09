@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto, AdminLoginDto } from './dto/login.dto';
+import { SwitchBranchDto } from '../chain/dto/chain.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -69,10 +70,10 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async switchBranch(
     @CurrentUser() user: any,
-    @Body() body: { targetTenantId: string },
+    @Body() body: SwitchBranchDto,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.authService.switchBranch(body.targetTenantId, user.tenantId, user.role);
+    const result = await this.authService.switchBranch(body.targetTenantId, user);
     if (result?.accessToken) {
       res.cookie('dawaee_token', result.accessToken, COOKIE_OPTIONS);
     }

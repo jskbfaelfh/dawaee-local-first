@@ -64,6 +64,12 @@ export async function apiRequest<T>(
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
+    if (response.status === 401 && !endpoint.includes('/auth/')) {
+      clearAuthToken();
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
     const errorMsg =
       data?.message ||
       (Array.isArray(data?.message) ? data.message.join(', ') : 'حدث خطأ في الاتصال بالسيرفر');

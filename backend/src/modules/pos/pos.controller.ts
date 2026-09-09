@@ -29,7 +29,7 @@ export class PosController {
     return this.posService.syncOfflineSales(dto);
   }
 
-  @Post('return')
+  @Post(['return', 'returns'])
   async processReturn(@Body() dto: CreateReturnDto) {
     return this.posService.processReturn(dto);
   }

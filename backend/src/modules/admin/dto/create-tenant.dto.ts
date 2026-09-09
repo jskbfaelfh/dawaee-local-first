@@ -65,8 +65,17 @@ export class CreateTenantDto {
   ownerUsername: string;
 
   @IsString()
+  @IsOptional()
   @MinLength(8, { message: 'كلمة مرور صاحب الصيدلية يجب أن لا تقل عن 8 أحرف وأرقام' })
-  ownerPassword: string;
+  ownerPassword?: string;
+
+  @IsString()
+  @IsOptional()
+  ownerUserId?: string;
+
+  @IsString()
+  @IsOptional()
+  ownerPasswordHash?: string;
 
   // Auto Create Cashier Account
   @IsBoolean()

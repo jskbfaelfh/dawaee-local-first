@@ -12,7 +12,7 @@ async function bootstrap() {
   // Verify critical security configuration
   validateStartupSecurity();
 
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
 
   // Parse cookies for secure HttpOnly session tokens
   app.use(cookieParser());
@@ -38,8 +38,11 @@ async function bootstrap() {
   app.use((req: any, res: any, next: any) => {
     const url = req.originalUrl || req.url || '';
     const isImageUpload =
+      url.includes('/purchases/ai-scan-invoice') ||
+      url.includes('/purchases/upload-invoice-image') ||
       url.includes('/purchases/ai-invoice') ||
-      url.includes('/inventory/suppliers/payments');
+      url.includes('/inventory/suppliers/payments') ||
+      url.includes('/backup/restore');
 
     const limit = isImageUpload ? '20mb' : '2mb';
     json({ limit })(req, res, (err) => {
