@@ -128,10 +128,13 @@ BEGIN
   ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_applied_amount DECIMAL(12, 2) DEFAULT 0;
   ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS discount_tiers JSONB;
   ALTER TABLE "${schemaName}".purchase_invoice_items ALTER COLUMN expiry_date DROP NOT NULL;
-  ALTER TABLE "${schemaName}".purchase_invoice_items ADD COLUMN IF NOT EXISTS bonus_packs INT DEFAULT 0;
+   ALTER TABLE "${schemaName}".purchase_invoice_items ADD COLUMN IF NOT EXISTS bonus_packs INT DEFAULT 0;
   ALTER TABLE "${schemaName}".purchase_invoice_items ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5, 2) DEFAULT 0;
+  ALTER TABLE "${schemaName}".purchase_invoice_items ADD COLUMN IF NOT EXISTS amortize_bonus BOOLEAN DEFAULT TRUE;
   ALTER TABLE "${schemaName}".purchase_items ALTER COLUMN expiry_date DROP NOT NULL;
+  ALTER TABLE "${schemaName}".purchase_items ADD COLUMN IF NOT EXISTS amortize_bonus BOOLEAN DEFAULT TRUE;
   ALTER TABLE "${schemaName}".inventory_batches ALTER COLUMN expiry_date DROP NOT NULL;
+  ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_bonus BOOLEAN DEFAULT FALSE;
 END $$;`;
 
       await this.prisma.$executeRawUnsafe(sqlBlock);
@@ -286,10 +289,11 @@ END $$;`;
         : 0;
       const finalLineNet = Math.max(0, lineCostBeforeDirect - lineShareOfDirectDiscount);
       const totalCost = finalLineNet;
+      const amortizeBonus = item.amortizeBonus !== false;
       const totalPacks = quantityPacks + bonusPacks;
-      const effectiveNetCostPack = totalPacks > 0
-        ? Number((finalLineNet / totalPacks).toFixed(2))
-        : netCostPack;
+      const effectiveNetCostPack = (amortizeBonus && bonusPacks > 0)
+        ? (totalPacks > 0 ? Number((finalLineNet / totalPacks).toFixed(2)) : purchasePricePack)
+        : (quantityPacks > 0 ? Number((finalLineNet / quantityPacks).toFixed(2)) : purchasePricePack);
       const totalUnits = Math.round(totalPacks * unitsPerPack);
 
       let expiryDate: Date | null = null;
@@ -385,19 +389,8 @@ END $$;`;
           ? item.shelfLocation.trim()
           : inventoryItem?.shelf_location || null;
 
-      let resolvedExpiryDate: Date | null = expiryDate;
-      if (!resolvedExpiryDate && inventoryItem) {
-        try {
-          const lastBatches = await this.prisma.$queryRawUnsafe<Array<{ expiry_date: Date }>>(`
-            SELECT expiry_date FROM "${schema}"."inventory_batches"
-            WHERE inventory_item_id = $1::uuid
-            ORDER BY created_at DESC LIMIT 1;
-          `, inventoryItem.id);
-          if (lastBatches.length > 0 && lastBatches[0].expiry_date) {
-            resolvedExpiryDate = new Date(lastBatches[0].expiry_date);
-          }
-        } catch {}
-      }
+      // Clinical safety: NEVER inherit expiry date from previous batches (a new batch has its own independent expiry)
+      const resolvedExpiryDate: Date | null = expiryDate;
 
       if (!inventoryItem) {
         const createdInv = await this.prisma.$queryRawUnsafe<Array<{ id: string }>>(`
@@ -428,17 +421,18 @@ END $$;`;
       // Insert into purchase_items
       await this.prisma.$executeRawUnsafe(`
         INSERT INTO "${schema}"."purchase_items" (
-          "purchase_id", "inventory_item_id", "quantity_packs", "bonus_packs", "units_per_pack",
+          "purchase_id", "inventory_item_id", "quantity_packs", "bonus_packs", "amortize_bonus", "units_per_pack",
           "purchase_price_pack", "discount_percent", "net_cost_pack", "selling_price_pack", "selling_price_unit",
           "expiry_date", "batch_number"
         ) VALUES (
-          $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+          $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
         );
       `,
         purchaseId,
         inventoryItemId,
         quantityPacks,
         bonusPacks,
+        amortizeBonus,
         resolvedUnits,
         purchasePricePack,
         discountPercent,
@@ -453,10 +447,10 @@ END $$;`;
       await this.prisma.$executeRawUnsafe(`
         INSERT INTO "${schema}"."purchase_invoice_items" (
           "purchase_invoice_id", "medicine_id", "trade_name", "scientific_name",
-          "batch_number", "expiry_date", "quantity_packs", "bonus_packs", "units_per_pack",
+          "batch_number", "expiry_date", "quantity_packs", "bonus_packs", "amortize_bonus", "units_per_pack",
           "purchase_price_pack", "discount_percent", "selling_price_pack", "total_cost"
         ) VALUES (
-          $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+          $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
         );
       `,
         invoiceId,
@@ -467,6 +461,7 @@ END $$;`;
         resolvedExpiryDate,
         quantityPacks,
         bonusPacks,
+        amortizeBonus,
         resolvedUnits,
         purchasePricePack,
         discountPercent,
@@ -474,25 +469,79 @@ END $$;`;
         totalCost
       );
 
-      // Add Batch to Inventory
-      await this.prisma.$executeRawUnsafe(`
-        INSERT INTO "${schema}"."inventory_batches" (
-          "inventory_item_id", "supplier_id", "purchase_id", "batch_number", "purchase_price_pack",
-          "selling_price_pack", "selling_price_unit", "quantity_units_remaining", "expiry_date", "is_recalled"
-        ) VALUES (
-          $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, FALSE
+      // Add Batch(es) to Inventory
+      if (!amortizeBonus && bonusPacks > 0) {
+        // 1. Purchased Batch (وجبة الشراء الأصلية بكامل السعر)
+        const purchasedBatchUnits = quantityPacks * resolvedUnits;
+        await this.prisma.$executeRawUnsafe(`
+          INSERT INTO "${schema}"."inventory_batches" (
+            "inventory_item_id", "supplier_id", "purchase_id", "batch_number", "purchase_price_pack",
+            "selling_price_pack", "selling_price_unit", "quantity_units_remaining", "expiry_date", "is_recalled", "is_bonus"
+          ) VALUES (
+            $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, FALSE, FALSE
+          );
+        `,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          batchNumber,
+          effectiveNetCostPack,
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          purchasedBatchUnits,
+          resolvedExpiryDate
         );
-      `,
-        inventoryItemId,
-        finalSupplierId,
-        purchaseId,
-        batchNumber,
-        effectiveNetCostPack,
-        resolvedSellingPack,
-        resolvedSellingUnit,
-        totalBatchUnits,
-        resolvedExpiryDate
-      );
+
+        // 2. Bonus Batch (وجبة بونص كوجبة دواء مستقلة بسعر شراء 0 د.ع)
+        const bonusBatchUnits = bonusPacks * resolvedUnits;
+        const bonusBatchNumber = (item.bonusBatchNumber && String(item.bonusBatchNumber).trim().length > 0)
+          ? String(item.bonusBatchNumber).trim()
+          : (batchNumber ? `${batchNumber}-BONUS` : 'BN-BONUS');
+        let bonusExpiryDate = resolvedExpiryDate;
+        if (item.bonusExpiryDate && String(item.bonusExpiryDate).trim()) {
+          const bd = new Date(item.bonusExpiryDate);
+          if (!isNaN(bd.getTime())) bonusExpiryDate = bd;
+        }
+
+        await this.prisma.$executeRawUnsafe(`
+          INSERT INTO "${schema}"."inventory_batches" (
+            "inventory_item_id", "supplier_id", "purchase_id", "batch_number", "purchase_price_pack",
+            "selling_price_pack", "selling_price_unit", "quantity_units_remaining", "expiry_date", "is_recalled", "is_bonus"
+          ) VALUES (
+            $1::uuid, $2::uuid, $3::uuid, $4, 0, $5, $6, $7, $8, FALSE, TRUE
+          );
+        `,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          bonusBatchNumber,
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          bonusBatchUnits,
+          bonusExpiryDate
+        );
+      } else {
+        // Amortized Batch (وجبة مدمجة مذوّبة)
+        const totalBatchUnits = (quantityPacks + bonusPacks) * resolvedUnits;
+        await this.prisma.$executeRawUnsafe(`
+          INSERT INTO "${schema}"."inventory_batches" (
+            "inventory_item_id", "supplier_id", "purchase_id", "batch_number", "purchase_price_pack",
+            "selling_price_pack", "selling_price_unit", "quantity_units_remaining", "expiry_date", "is_recalled", "is_bonus"
+          ) VALUES (
+            $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, FALSE, FALSE
+          );
+        `,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          batchNumber,
+          effectiveNetCostPack,
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          totalBatchUnits,
+          resolvedExpiryDate
+        );
+      }
     }
 
     // 4. Record payment in supplier_payments if paidAmount > 0

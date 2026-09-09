@@ -29,6 +29,7 @@ export interface ScannedItem {
   unitsPerPack: number;
   quantityPacks: number;
   bonusPacks: number;
+  amortizeBonus?: boolean;
   purchasePricePack: number;
   lastPurchasePricePack?: number;
   discountPercent: number;
@@ -182,6 +183,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
             unitsPerPack: units,
             quantityPacks: Number(it.quantityPacks) || 1,
             bonusPacks: Number(it.bonusQuantity || it.bonusPacks) || 0,
+            amortizeBonus: true,
             purchasePricePack: Number(it.purchasePricePack) || 0,
             lastPurchasePricePack: Number(it.lastPurchasePricePack || 0),
             discountPercent: Number(it.discountPercent) || 0,
@@ -323,6 +325,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
       unitsPerPack: 1,
       quantityPacks: 1,
       bonusPacks: 0,
+      amortizeBonus: true,
       purchasePricePack: 0,
       lastPurchasePricePack: 0,
       discountPercent: 0,
@@ -446,6 +449,7 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
             expiryDate,
             quantityPacks: Number(it.quantityPacks) || 1,
             bonusPacks: Number(it.bonusPacks) || 0,
+            amortizeBonus: it.amortizeBonus !== false,
             unitsPerPack: Number(it.unitsPerPack) || 1,
             purchasePricePack: Number(it.purchasePricePack) || 0,
             discountPercent: Number(it.discountPercent) || 0,
@@ -951,6 +955,24 @@ export const SmartInvoiceScannerModal: React.FC<SmartInvoiceScannerModalProps> =
                                   onKeyDown={(e) => handleKeyDownNav(e, `scanner-purchase-${idx}`)}
                                   className="w-14 p-1.5 text-center bg-emerald-50 border border-emerald-200 rounded-lg font-mono font-bold text-emerald-800 text-xs focus:bg-white focus:border-emerald-500 focus:outline-hidden"
                                 />
+                                {Number(item.bonusPacks || 0) > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => updateItemField(idx, 'amortizeBonus', item.amortizeBonus === false ? true : false)}
+                                    className={`px-1.5 py-0.5 mt-1 rounded text-[10px] font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 w-full ${
+                                      item.amortizeBonus !== false
+                                        ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                                        : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'
+                                    }`}
+                                    title={
+                                      item.amortizeBonus !== false
+                                        ? 'تذويب: تخفيض كلفة الشراء للباكيت. انقر للفصل كوجبة بونص مجانية'
+                                        : 'وجبة منفصلة: يدخل البونص كتشغيلة مجانية برصيد منفصل (كلفة 0). انقر للتحويل إلى تذويب'
+                                    }
+                                  >
+                                    {item.amortizeBonus !== false ? '💧 تذويب' : '🎁 منفصل'}
+                                  </button>
+                                )}
                               </td>
 
                               {/* 6. Purchase Price Pack */}

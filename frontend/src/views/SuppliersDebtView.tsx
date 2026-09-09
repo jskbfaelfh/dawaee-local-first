@@ -13,6 +13,13 @@ import {
   Banknote,
   Clock,
   Percent,
+  Camera,
+  Eye,
+  ZoomIn,
+  ZoomOut,
+  RotateCw,
+  Download,
+  Trash2,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 
@@ -50,15 +57,71 @@ export const SuppliersDebtView: React.FC = () => {
     paymentDate: new Date().toISOString().slice(0, 10),
     paymentMethod: 'CASH',
     receiptNumber: '',
+    receiptImage: '',
     notes: '',
   });
   const [payingLoading, setPayingLoading] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+
+  // Receipt Lightbox Modal
+  const [selectedReceiptModal, setSelectedReceiptModal] = useState<{
+    image: string;
+    supplierName?: string;
+    amount?: number;
+    date?: string;
+    receiptNumber?: string;
+  } | null>(null);
+  const [receiptZoom, setReceiptZoom] = useState(1);
+  const [receiptRotation, setReceiptRotation] = useState(0);
 
   // Ledger / Statement Modal
   const [ledgerSupplier, setLedgerSupplier] = useState<any | null>(null);
   const [ledgerData, setLedgerData] = useState<any | null>(null);
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [ledgerTab, setLedgerTab] = useState<'INVOICES' | 'PAYMENTS'>('INVOICES');
+
+  // Client-side Image Compression Helper
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxDimension = 1280;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > maxDimension) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            }
+          } else {
+            if (height > maxDimension) {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(e.target?.result as string);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          resolve(compressedDataUrl);
+        };
+        img.onerror = reject;
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
 
   // Fetch Data
   const fetchData = async () => {
@@ -150,6 +213,7 @@ export const SuppliersDebtView: React.FC = () => {
       paymentDate: new Date().toISOString().slice(0, 10),
       paymentMethod: 'CASH',
       receiptNumber: '',
+      receiptImage: '',
       notes: '',
     });
   };
@@ -821,6 +885,119 @@ export const SuppliersDebtView: React.FC = () => {
                 />
               </div>
 
+              {/* Optional Receipt Photo Attachment */}
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>صورة وصل التسديد (وصل المذخر أو المندوب)</span>
+                  </label>
+                  <span className="text-[10px] bg-slate-100 text-slate-500 font-bold px-2 py-0.5 rounded-md">
+                    اختياري
+                  </span>
+                </div>
+
+                {!paymentForm.receiptImage ? (
+                  <div>
+                    <input
+                      type="file"
+                      id="receipt-photo-upload"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setIsCompressing(true);
+                        try {
+                          const compressed = await compressImage(file);
+                          setPaymentForm((prev) => ({ ...prev, receiptImage: compressed }));
+                        } catch (err) {
+                          console.error('Failed to process image:', err);
+                          alert('فشل معالجة الصورة، يرجى اختيار صورة أخرى');
+                        } finally {
+                          setIsCompressing(false);
+                          e.target.value = '';
+                        }
+                      }}
+                    />
+                    <label
+                      htmlFor="receipt-photo-upload"
+                      className={`w-full py-3 px-4 border-2 border-dashed border-indigo-200 hover:border-indigo-400 bg-indigo-50/40 hover:bg-indigo-50/80 rounded-2xl flex items-center justify-center gap-2 cursor-pointer transition-all ${
+                        isCompressing ? 'opacity-50 pointer-events-none' : ''
+                      }`}
+                    >
+                      <Camera className="w-4 h-4 text-indigo-600" />
+                      <span className="text-xs font-bold text-indigo-900">
+                        {isCompressing ? 'جاري ضغط ومعالجة الصورة...' : 'التقاط بالكاميرا أو اختيار صورة الوصل 📷'}
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-2xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div
+                        className="relative group cursor-pointer shrink-0"
+                        onClick={() =>
+                          setSelectedReceiptModal({
+                            image: paymentForm.receiptImage,
+                            supplierName: payingSupplier?.name,
+                            amount: paymentForm.amount,
+                            date: paymentForm.paymentDate,
+                            receiptNumber: paymentForm.receiptNumber,
+                          })
+                        }
+                      >
+                        <img
+                          src={paymentForm.receiptImage}
+                          alt="وصل التسديد"
+                          className="w-12 h-12 object-cover rounded-xl border border-emerald-300 shadow-2xs"
+                        />
+                        <div className="absolute inset-0 bg-black/30 rounded-xl opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                          <Eye className="w-4 h-4 text-white" />
+                        </div>
+                      </div>
+                      <div className="truncate">
+                        <span className="text-xs font-black text-emerald-900 flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>تم إرفاق صورة الوصل بنجاح</span>
+                        </span>
+                        <span className="text-[10px] text-emerald-700 block truncate">
+                          اضغط على الصورة للمعاينة المكبرة
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedReceiptModal({
+                            image: paymentForm.receiptImage,
+                            supplierName: payingSupplier?.name,
+                            amount: paymentForm.amount,
+                            date: paymentForm.paymentDate,
+                            receiptNumber: paymentForm.receiptNumber,
+                          })
+                        }
+                        className="p-1.5 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors cursor-pointer"
+                        title="معاينة"
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPaymentForm((prev) => ({ ...prev, receiptImage: '' }))}
+                        className="p-1.5 text-rose-600 hover:bg-rose-100 rounded-lg transition-colors cursor-pointer"
+                        title="حذف الصورة"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="pt-2 flex gap-2">
                 <button
                   type="submit"
@@ -976,13 +1153,14 @@ export const SuppliersDebtView: React.FC = () => {
                       <th className="p-2.5">المدفوع نقداً</th>
                       <th className="p-2.5">طريقة الدفع</th>
                       <th className="p-2.5">رقم الوصل</th>
+                      <th className="p-2.5 text-center">وصل التسديد</th>
                       <th className="p-2.5">ملاحظات</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {ledgerData?.payments?.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="p-6 text-center text-slate-400 font-bold">
+                        <td colSpan={8} className="p-6 text-center text-slate-400 font-bold">
                           لا توجد دفعات
                         </td>
                       </tr>
@@ -1014,6 +1192,31 @@ export const SuppliersDebtView: React.FC = () => {
                           <td className="p-2.5 font-mono text-indigo-700 font-bold">
                             {pay.receiptNumber || '—'}
                           </td>
+                          <td className="p-2.5 text-center">
+                            {pay.receiptImage ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setReceiptZoom(1);
+                                  setReceiptRotation(0);
+                                  setSelectedReceiptModal({
+                                    image: pay.receiptImage,
+                                    supplierName: ledgerSupplier?.name,
+                                    amount: pay.amount,
+                                    date: pay.paymentDate,
+                                    receiptNumber: pay.receiptNumber,
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200 transition-all cursor-pointer shadow-2xs hover:scale-105 active:scale-95"
+                                title="اضغط لمعاينة وصل التسديد"
+                              >
+                                <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                                <span>معاينة الوصل 📷</span>
+                              </button>
+                            ) : (
+                              <span className="text-slate-300 font-mono text-[11px]">—</span>
+                            )}
+                          </td>
                           <td className="p-2.5 text-slate-500">
                             {pay.notes || '—'}
                           </td>
@@ -1032,6 +1235,135 @@ export const SuppliersDebtView: React.FC = () => {
               >
                 إغلاق
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 4: Receipt Image Lightbox Viewer Modal */}
+      {selectedReceiptModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 z-60 animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-3xl max-w-4xl w-full max-h-[95vh] flex flex-col shadow-2xl overflow-hidden text-white">
+            {/* Header */}
+            <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/90">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                  <Camera className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm text-white flex items-center gap-2">
+                    <span>وصل تسديد: {selectedReceiptModal.supplierName || 'المذخر'}</span>
+                    {selectedReceiptModal.receiptNumber && (
+                      <span className="px-2 py-0.5 bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 font-mono rounded-md text-xs font-bold">
+                        #{selectedReceiptModal.receiptNumber}
+                      </span>
+                    )}
+                  </h3>
+                  <div className="flex items-center gap-3 text-[11px] text-slate-400 font-bold mt-0.5">
+                    {selectedReceiptModal.amount && (
+                      <span>
+                        المبلغ المسدد:{' '}
+                        <b className="font-mono text-emerald-400 font-black">
+                          {Number(selectedReceiptModal.amount).toLocaleString()} د.ع
+                        </b>
+                      </span>
+                    )}
+                    {selectedReceiptModal.date && (
+                      <span>
+                        التاريخ:{' '}
+                        <b className="font-mono text-slate-300">
+                          {new Date(selectedReceiptModal.date).toLocaleDateString('ar-IQ')}
+                        </b>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Toolbar */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setReceiptZoom((prev) => Math.min(3, prev + 0.25))}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors cursor-pointer"
+                  title="تكبير"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReceiptZoom((prev) => Math.max(0.5, prev - 0.25))}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors cursor-pointer"
+                  title="تصغير"
+                >
+                  <ZoomOut className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReceiptRotation((prev) => (prev + 90) % 360)}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition-colors cursor-pointer"
+                  title="تدوير 90 درجة"
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+                <a
+                  href={selectedReceiptModal.image}
+                  download={`وصل_تسديد_${selectedReceiptModal.supplierName || 'مذخر'}_${
+                    selectedReceiptModal.receiptNumber || 'receipt'
+                  }.jpg`}
+                  className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl transition-colors cursor-pointer"
+                  title="تنزيل الصورة"
+                >
+                  <Download className="w-4 h-4" />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedReceiptModal(null);
+                    setReceiptZoom(1);
+                    setReceiptRotation(0);
+                  }}
+                  className="p-2 bg-slate-800 hover:bg-rose-900/60 hover:text-rose-300 text-slate-400 rounded-xl transition-colors cursor-pointer ml-1"
+                  title="إغلاق"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Image Canvas Container */}
+            <div className="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[350px] max-h-[75vh] bg-slate-950/60">
+              <img
+                src={selectedReceiptModal.image}
+                alt="وصل التسديد"
+                style={{
+                  transform: `scale(${receiptZoom}) rotate(${receiptRotation}deg)`,
+                  transition: 'transform 0.2s ease-out',
+                  maxHeight: '70vh',
+                  maxWidth: '100%',
+                  objectFit: 'contain',
+                }}
+                className="rounded-xl shadow-2xl select-none"
+              />
+            </div>
+
+            {/* Footer with Reset & Info */}
+            <div className="px-5 py-2.5 bg-slate-900 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+              <span>
+                تكبير: {Math.round(receiptZoom * 100)}% | تدوير: {receiptRotation}°
+              </span>
+              {(receiptZoom !== 1 || receiptRotation !== 0) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReceiptZoom(1);
+                    setReceiptRotation(0);
+                  }}
+                  className="text-indigo-400 hover:text-indigo-300 font-bold underline cursor-pointer"
+                >
+                  إعادة ضبط العرض
+                </button>
+              )}
             </div>
           </div>
         </div>

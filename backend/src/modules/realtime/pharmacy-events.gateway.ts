@@ -8,12 +8,20 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
+import { isOriginAllowed } from '../../common/utils/security.util';
 
 @WebSocketGateway({
-  cors: {
-    origin: '*',
-  },
   namespace: '/realtime',
+  cors: {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`WebSocket origin ${origin} not allowed by CORS`), false);
+      }
+    },
+    credentials: true,
+  },
 })
 export class PharmacyEventsGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -27,21 +35,46 @@ export class PharmacyEventsGateway
 
   async handleConnection(client: Socket) {
     try {
-      const authHeader = client.handshake.headers.authorization;
-      const token =
-        client.handshake.auth?.token ||
-        (authHeader ? authHeader.replace('Bearer ', '') : null) ||
-        client.handshake.query?.token;
+      // SECURITY: Reject tokens passed in URL query string to prevent leakage in logs, proxies, and history
+      if (client.handshake.query?.token) {
+        this.logger.warn(
+          `Security violation: Client ${client.id} attempted to pass JWT in query parameter. Query tokens are strictly prohibited.`,
+        );
+        client.disconnect(true);
+        return;
+      }
+
+      // Safe token sources:
+      // 1. Socket.IO handshake auth: client.handshake.auth?.token
+      // 2. HTTP Authorization Header: client.handshake.headers.authorization
+      // 3. HttpOnly Cookie: dawaee_token or token
+      let token = client.handshake.auth?.token;
+      if (!token && client.handshake.headers.authorization) {
+        token = client.handshake.headers.authorization.replace(/^Bearer\s+/i, '').trim();
+      }
+      if (!token && client.handshake.headers.cookie) {
+        const cookies = client.handshake.headers.cookie.split(';').map((c) => c.trim());
+        for (const cookie of cookies) {
+          if (cookie.startsWith('dawaee_token=')) {
+            token = cookie.slice('dawaee_token='.length);
+            break;
+          }
+          if (cookie.startsWith('token=')) {
+            token = cookie.slice('token='.length);
+            break;
+          }
+        }
+      }
 
       if (!token) {
         this.logger.warn(`Client ${client.id} connected without token, disconnecting.`);
-        client.disconnect();
+        client.disconnect(true);
         return;
       }
 
       const decoded: any = this.jwtService.verify(token as string);
       if (!decoded || !decoded.tenantId) {
-        client.disconnect();
+        client.disconnect(true);
         return;
       }
 
@@ -53,7 +86,7 @@ export class PharmacyEventsGateway
       this.logger.log(`Client ${client.id} joined room ${roomName}`);
     } catch (err: any) {
       this.logger.warn(`Auth failed for socket ${client.id}: ${err.message}`);
-      client.disconnect();
+      client.disconnect(true);
     }
   }
 

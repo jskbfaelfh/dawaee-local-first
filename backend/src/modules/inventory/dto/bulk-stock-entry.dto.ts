@@ -45,6 +45,25 @@ export class BulkStockItemDto {
   @IsOptional()
   bonusPacks?: number;
 
+  @IsOptional()
+  amortizeBonus?: boolean;
+
+  @IsString()
+  @IsOptional()
+  bonusBatchNumber?: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  @IsOptional()
+  bonusExpiryMonth?: number;
+
+  @IsInt()
+  @Min(2024)
+  @Max(2050)
+  @IsOptional()
+  bonusExpiryYear?: number;
+
   @IsNumber()
   @Min(0)
   @Max(100)
@@ -235,6 +254,10 @@ export class RecordSupplierPaymentDto {
   @IsString()
   @IsOptional()
   notes?: string;
+
+  @IsString()
+  @IsOptional()
+  receiptImage?: string;
 }
 
 export class ReturnToSupplierDto {

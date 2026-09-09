@@ -585,14 +585,21 @@ export const ExpiryView: React.FC<ExpiryViewProps> = ({ onNavigateToInventory })
 
                       {/* Batch Number Pill */}
                       <td className="p-4">
-                        <button
-                          onClick={() => setSelectedTraceBatch(b.batchNumber)}
-                          className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer flex items-center gap-1"
-                          title="انقر لتتبع مسار الوجبة بالتفصيل"
-                        >
-                          <Layers className="w-3 h-3 text-purple-500" />
-                          <span>#{b.batchNumber}</span>
-                        </button>
+                        <div className="flex flex-col items-start gap-1">
+                          <button
+                            onClick={() => setSelectedTraceBatch(b.batchNumber)}
+                            className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer flex items-center gap-1"
+                            title="انقر لتتبع مسار الوجبة بالتفصيل"
+                          >
+                            <Layers className="w-3 h-3 text-purple-500" />
+                            <span>#{b.batchNumber}</span>
+                          </button>
+                          {b.isBonus && (
+                            <span className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-md text-[10px] font-black">
+                              🎁 وجبة بونص
+                            </span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Shelf Location */}

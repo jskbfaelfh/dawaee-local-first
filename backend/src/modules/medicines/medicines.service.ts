@@ -54,7 +54,7 @@ export class MedicinesService {
   /**
    * Add a new medicine to the Global Catalog
    */
-  async create(dto: CreateMedicineDto) {
+  async create(dto: CreateMedicineDto, isSuperAdmin: boolean = false) {
     // If barcode exists, check for duplicate
     if (dto.barcode) {
       const existing = await this.prisma.medicine.findFirst({
@@ -67,14 +67,15 @@ export class MedicinesService {
 
     const medicine = await this.prisma.medicine.create({
       data: {
-        tradeName: dto.tradeName,
-        scientificName: dto.scientificName,
-        dosageForm: dto.dosageForm,
-        strength: dto.strength,
-        manufacturer: dto.manufacturer,
-        barcode: dto.barcode,
+        tradeName: dto.tradeName.trim(),
+        scientificName: dto.scientificName?.trim() || null,
+        dosageForm: dto.dosageForm || null,
+        strength: dto.strength || null,
+        manufacturer: dto.manufacturer || null,
+        barcode: dto.barcode?.trim() || null,
         defaultUnitsPerPack: dto.defaultUnitsPerPack || 1,
-        isVerified: dto.isVerified !== undefined ? dto.isVerified : false,
+        isVerified: isSuperAdmin ? (dto.isVerified ?? true) : false,
+        needsPackagingReview: !isSuperAdmin,
       },
     });
 
@@ -237,16 +238,29 @@ export class MedicinesService {
    * SuperAdmin rejects/deletes a medicine
    */
   async deleteMedicine(id: string) {
-    const existing = await this.prisma.medicine.findUnique({ where: { id } });
+    const existing = await this.prisma.medicine.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { searchIndexes: true },
+        },
+      },
+    });
     if (!existing) {
       throw new NotFoundException('الدواء غير موجود');
+    }
+
+    if (existing._count?.searchIndexes > 0) {
+      throw new BadRequestException(
+        `لا يمكن حذف الدواء (${existing.tradeName}) لوجود صيدليات (${existing._count.searchIndexes}) تبيعه حالياً في مخزونها النشط. يرجى تعديل بياناته بدلاً من حذفه.`,
+      );
     }
 
     await this.prisma.medicine.delete({ where: { id } });
 
     return {
       success: true,
-      message: 'تم حذف الدواء بنجاح',
+      message: `تم حذف الدواء (${existing.tradeName}) بنجاح`,
     };
   }
 

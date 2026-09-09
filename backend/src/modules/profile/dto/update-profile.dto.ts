@@ -74,7 +74,7 @@ export class ChangeOwnerPasswordDto {
   currentPassword: string;
 
   @IsString()
-  @MinLength(6, { message: 'كلمة المرور الجديدة يجب أن تكون 6 خانات على الأقل' })
+  @MinLength(8, { message: 'كلمة المرور الجديدة يجب أن لا تقل عن 8 أحرف وأرقام' })
   newPassword: string;
 }
 
@@ -88,12 +88,12 @@ export class CreateCashierDto {
   username: string;
 
   @IsString()
-  @MinLength(6, { message: 'كلمة المرور يجب أن تكون 6 خانات على الأقل' })
+  @MinLength(8, { message: 'كلمة المرور يجب أن لا تقل عن 8 أحرف وأرقام' })
   password: string;
 }
 
 export class ResetCashierPasswordDto {
   @IsString()
-  @MinLength(6, { message: 'كلمة المرور يجب أن تكون 6 خانات على الأقل' })
+  @MinLength(8, { message: 'كلمة المرور يجب أن لا تقل عن 8 أحرف وأرقام' })
   newPassword: string;
 }

@@ -16,6 +16,10 @@ export function clearAuthToken() {
   localStorage.removeItem('dawaee_token');
   localStorage.removeItem('dawaee_user');
   localStorage.removeItem('dawaee_pharmacy');
+  fetch(`${API_BASE}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+  }).catch(() => {});
 }
 
 export function getStoredUser(): any | null {
@@ -53,6 +57,7 @@ export async function apiRequest<T>(
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
+    credentials: 'include',
     headers,
   });
 

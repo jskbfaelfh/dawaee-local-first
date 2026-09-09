@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../database/prisma.service';
 import { ProvisioningService } from './provisioning.service';
+import { generateSecurePassword, isWeakPassword, sanitizeTenantResponse, encryptSecret } from '../../common/utils/security.util';
 import {
   CreateTenantDto,
   UpdateTenantDto,
@@ -31,75 +32,111 @@ export class AdminService {
   }
 
   /**
-   * Bulk Onboard a Multi-Branch Chain in 1 Step
+   * Bulk Onboard a Multi-Branch Chain in 1 Step with Atomic Rollback
    */
   async onboardBulkChain(dto: BulkChainOnboardingDto) {
     if (!dto.branches || dto.branches.length === 0) {
-      throw new Error('يجب تحديد فرع واحد على الأقل للسلسلة');
+      throw new BadRequestException('يجب تحديد فرع واحد على الأقل للسلسلة');
     }
 
-    // 1. Create the PharmacyChain master record
-    const chain = await this.prisma.pharmacyChain.create({
-      data: {
-        name: dto.chainName,
-        ownerName: dto.ownerName,
-        ownerPhone: dto.ownerPhone || '',
-      },
-    });
-
-    // 2. Identify HQ index (if none specified, first branch is HQ)
-    let hqFound = false;
+    let chain: any = null;
     const branchesResults: any[] = [];
+    const createdTenants: { id: string; schemaName: string }[] = [];
 
-    for (let i = 0; i < dto.branches.length; i++) {
-      const b = dto.branches[i];
-      let isHQ = b.isHQ;
-      if (isHQ && !hqFound) {
-        hqFound = true;
-      } else if (!hqFound && i === 0) {
-        isHQ = true;
-        hqFound = true;
-      } else {
-        isHQ = false;
+    try {
+      // 1. Create the PharmacyChain master record
+      chain = await this.prisma.pharmacyChain.create({
+        data: {
+          name: dto.chainName,
+          ownerName: dto.ownerName,
+          ownerPhone: dto.ownerPhone || '',
+        },
+      });
+
+      // 2. Identify HQ index (if none specified, first branch is HQ)
+      let hqFound = false;
+
+      for (let i = 0; i < dto.branches.length; i++) {
+        const b = dto.branches[i];
+        let isHQ = b.isHQ;
+        if (isHQ && !hqFound) {
+          hqFound = true;
+        } else if (!hqFound && i === 0) {
+          isHQ = true;
+          hqFound = true;
+        } else {
+          isHQ = false;
+        }
+
+        const branchSlug = b.slug || `${dto.ownerUsername}_b${i + 1}`;
+
+        const tenantDto: CreateTenantDto = {
+          name: b.name,
+          slug: branchSlug,
+          governorate: b.governorate,
+          district: b.district,
+          addressDetails: b.addressDetails,
+          phone: b.phone || dto.ownerPhone,
+          subscriptionMonths: b.subscriptionMonths,
+          ownerName: dto.ownerName,
+          ownerUsername: i === 0 ? dto.ownerUsername : `${dto.ownerUsername}_b${i + 1}`,
+          ownerPassword: dto.ownerPassword,
+          cashierCount: b.cashierCount !== undefined ? b.cashierCount : 1,
+          cashierPassword: b.cashierPassword,
+          chainId: chain.id,
+          chainRole: isHQ ? 'HQ' : 'BRANCH',
+        };
+
+        const result = await this.provisioningService.provisionPharmacy(tenantDto);
+        createdTenants.push({
+          id: result.tenant.id,
+          schemaName: result.tenant.schemaName,
+        });
+
+        branchesResults.push({
+          ...result,
+          isHQ,
+        });
       }
 
-      const branchSlug = b.slug || `${dto.ownerUsername}_b${i + 1}`;
-
-      const tenantDto: CreateTenantDto = {
-        name: b.name,
-        slug: branchSlug,
-        governorate: b.governorate,
-        district: b.district,
-        addressDetails: b.addressDetails,
-        phone: b.phone || dto.ownerPhone,
-        subscriptionMonths: b.subscriptionMonths,
-        ownerName: dto.ownerName,
-        ownerUsername: i === 0 ? dto.ownerUsername : `${dto.ownerUsername}_b${i + 1}`,
-        ownerPassword: dto.ownerPassword,
-        cashierCount: b.cashierCount !== undefined ? b.cashierCount : 1,
-        cashierPassword: b.cashierPassword || '123456',
-        chainId: chain.id,
-        chainRole: isHQ ? 'HQ' : 'BRANCH',
+      return {
+        chain,
+        ownerCredentials: {
+          name: dto.ownerName,
+          username: dto.ownerUsername,
+          password: dto.ownerPassword,
+          phone: dto.ownerPhone,
+        },
+        branches: branchesResults,
+        message: `تم إنشاء السلسلة (${dto.chainName}) وتجهيز ${branchesResults.length} فروع بنجاح!`,
       };
+    } catch (err: any) {
+      this.logger.error(`Bulk onboarding failed for chain "${dto.chainName}": ${err.message}. Rolling back all created branches...`);
 
-      const result = await this.provisioningService.provisionPharmacy(tenantDto);
-      branchesResults.push({
-        ...result,
-        isHQ,
-      });
+      // Rollback all created branches
+      for (const t of createdTenants) {
+        try {
+          await this.prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${t.schemaName}" CASCADE;`);
+          await this.prisma.centralSearchIndex.deleteMany({ where: { tenantId: t.id } });
+          await this.prisma.tenant.deleteMany({ where: { id: t.id } });
+          this.logger.log(`Rolled back branch tenant "${t.id}" and schema "${t.schemaName}"`);
+        } catch (rbErr: any) {
+          this.logger.error(`Failed to rollback branch tenant ${t.id}: ${rbErr.message}`);
+        }
+      }
+
+      // Rollback chain record
+      if (chain?.id) {
+        try {
+          await this.prisma.pharmacyChain.deleteMany({ where: { id: chain.id } });
+          this.logger.log(`Rolled back chain record "${chain.id}"`);
+        } catch (chainRbErr: any) {
+          this.logger.error(`Failed to rollback chain ${chain.id}: ${chainRbErr.message}`);
+        }
+      }
+
+      throw new BadRequestException(`فشلت عملية تهيئة السلسلة الجماعية: ${err.message}. تم التراجع عن كافة الفروع المنشأة بنجاح.`);
     }
-
-    return {
-      chain,
-      ownerCredentials: {
-        name: dto.ownerName,
-        username: dto.ownerUsername,
-        password: dto.ownerPassword,
-        phone: dto.ownerPhone,
-      },
-      branches: branchesResults,
-      message: `تم إنشاء السلسلة (${dto.chainName}) وتجهيز ${branchesResults.length} فروع بنجاح!`,
-    };
   }
 
   /**
@@ -199,9 +236,9 @@ export class AdminService {
       }
     }
 
-    ownerName = ownerName || parentTenant.name;
-    ownerUsername = ownerUsername || `owner_${dto.slug || Date.now().toString().slice(-4)}`;
-    ownerPassword = ownerPassword || '123456';
+    const finalOwnerName: string = ownerName || parentTenant.name || 'مدير الفرع';
+    const finalOwnerUsername: string = ownerUsername || `owner_${dto.slug || Date.now().toString().slice(-4)}`;
+    const finalOwnerPassword: string = ownerPassword || generateSecurePassword(14, 'BrOwn-');
 
     // 3. Provision new tenant as a BRANCH of this chain
     const createDto: CreateTenantDto = {
@@ -212,9 +249,9 @@ export class AdminService {
       addressDetails: dto.addressDetails,
       phone: dto.phone || parentTenant.phone,
       subscriptionMonths: dto.subscriptionMonths,
-      ownerName,
-      ownerUsername,
-      ownerPassword,
+      ownerName: finalOwnerName,
+      ownerUsername: finalOwnerUsername,
+      ownerPassword: finalOwnerPassword,
       cashierCount: dto.cashierCount !== undefined ? dto.cashierCount : 1,
       cashierPassword: dto.cashierPassword,
       chainId,
@@ -307,7 +344,7 @@ export class AdminService {
       },
     });
 
-    return tenants;
+    return tenants.map((t) => sanitizeTenantResponse(t));
   }
 
   /**
@@ -327,7 +364,7 @@ export class AdminService {
       throw new NotFoundException('الصيدلية غير موجودة');
     }
 
-    return tenant;
+    return sanitizeTenantResponse(tenant);
   }
 
   /**
@@ -347,18 +384,31 @@ export class AdminService {
         // Auto-provision schema on demand
         await this.provisioningService.createTenantSchemaAndTables(tenant.schemaName);
 
-        // Create default owner and cashier with standard password (123456)
-        const defaultPasswordHash = await bcrypt.hash('123456', 10);
+        // Create emergency owner and cashier with securely generated random passwords
+        const initialOwnerPassword = generateSecurePassword(14, 'Own-');
+        const initialCashierPassword = generateSecurePassword(12, 'Pos-');
+        const ownerPasswordHash = await bcrypt.hash(initialOwnerPassword, 10);
+        const cashierPasswordHash = await bcrypt.hash(initialCashierPassword, 10);
         const ownerUserId = crypto.randomUUID();
         const cashierUserId = crypto.randomUUID();
 
-        await this.prisma.$executeRawUnsafe(`
-          INSERT INTO "${tenant.schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
-          VALUES 
-            ('${ownerUserId}'::uuid, 'المالك - ${tenant.name.replace(/'/g, "''")}', '${tenant.slug}', '${defaultPasswordHash}', 'OWNER', TRUE, NOW()),
-            ('${cashierUserId}'::uuid, 'كاشير - ${tenant.name.replace(/'/g, "''")}', '${tenant.slug}_pos', '${defaultPasswordHash}', 'CASHIER', TRUE, NOW())
-          ON CONFLICT (username) DO NOTHING;
-        `);
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO "${tenant.schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
+           VALUES 
+             ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW()),
+             ($5::uuid, $6, $7, $8, 'CASHIER', TRUE, NOW())
+           ON CONFLICT (username) DO NOTHING;`,
+          ownerUserId,
+          `المالك - ${tenant.name}`,
+          tenant.slug,
+          ownerPasswordHash,
+          cashierUserId,
+          `كاشير - ${tenant.name}`,
+          `${tenant.slug}_pos`,
+          cashierPasswordHash,
+        );
+
+        this.logger.warn(`Security: Auto-provisioned missing credentials for tenant ${tenant.slug} with secure random passwords.`);
       }
 
       const users: any[] = await this.prisma.$queryRawUnsafe(`
@@ -392,6 +442,11 @@ export class AdminService {
    * Reset/change password for any user inside a pharmacy tenant
    */
   async resetTenantUserPassword(tenantId: string, userId: string, dto: ResetPasswordDto) {
+    const weakCheck = isWeakPassword(dto.newPassword);
+    if (weakCheck.isWeak) {
+      throw new BadRequestException(weakCheck.reason || 'كلمة المرور الجديدة ضعيفة جداً');
+    }
+
     const tenant = await this.getTenantById(tenantId);
 
     // Ensure table exists
@@ -420,7 +475,6 @@ export class AdminService {
     return {
       success: true,
       message: 'تم تغيير كلمة المرور بنجاح',
-      newPassword: dto.newPassword,
     };
   }
 
@@ -459,7 +513,7 @@ export class AdminService {
     });
 
     this.logger.log(`Tenant ${id} (${updated.name}) updated successfully.`);
-    return updated;
+    return sanitizeTenantResponse(updated);
   }
 
   /**
@@ -593,14 +647,37 @@ export class AdminService {
       throw new NotFoundException('الصيدلية غير موجودة');
     }
 
-    return this.prisma.tenant.update({
+    const data: any = {};
+    if (dto.r2BucketName !== undefined) {
+      data.r2BucketName = dto.r2BucketName ? dto.r2BucketName.trim() : null;
+    }
+
+    const rawAccount = (dto.r2AccountId || '').trim();
+    if (rawAccount && !rawAccount.startsWith('•••') && !rawAccount.includes('••••')) {
+      data.r2AccountId = encryptSecret(rawAccount);
+    } else if (dto.r2AccountId === null || dto.r2AccountId === '') {
+      data.r2AccountId = null;
+    }
+
+    const rawAccessKey = (dto.r2AccessKeyId || '').trim();
+    if (rawAccessKey && !rawAccessKey.startsWith('•••') && !rawAccessKey.includes('••••')) {
+      data.r2AccessKeyId = encryptSecret(rawAccessKey);
+    } else if (dto.r2AccessKeyId === null || dto.r2AccessKeyId === '') {
+      data.r2AccessKeyId = null;
+    }
+
+    const rawSecret = (dto.r2SecretAccessKey || '').trim();
+    if (rawSecret && !rawSecret.startsWith('•••') && !rawSecret.includes('••••')) {
+      data.r2SecretAccessKey = encryptSecret(rawSecret);
+    } else if (dto.r2SecretAccessKey === null || dto.r2SecretAccessKey === '') {
+      data.r2SecretAccessKey = null;
+    }
+
+    const updated = await this.prisma.tenant.update({
       where: { id },
-      data: {
-        r2BucketName: dto.r2BucketName || null,
-        r2AccountId: dto.r2AccountId || null,
-        r2AccessKeyId: dto.r2AccessKeyId || null,
-        r2SecretAccessKey: dto.r2SecretAccessKey || null,
-      },
+      data,
     });
+
+    return sanitizeTenantResponse(updated);
   }
 }

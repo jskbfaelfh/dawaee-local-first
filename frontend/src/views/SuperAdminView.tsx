@@ -391,8 +391,8 @@ export const SuperAdminView: React.FC = () => {
     if (backupReport?.masterR2) {
       setMasterR2Form({
         r2BucketName: backupReport.masterR2.r2BucketName || 'dawaee-backups',
-        r2AccountId: backupReport.masterR2.r2AccountId || '',
-        r2AccessKeyId: backupReport.masterR2.r2AccessKeyId || '',
+        r2AccountId: backupReport.masterR2.r2AccountIdMasked || backupReport.masterR2.r2AccountId || '',
+        r2AccessKeyId: backupReport.masterR2.r2AccessKeyIdMasked || backupReport.masterR2.r2AccessKeyId || '',
         r2SecretAccessKey: '',
       });
     }
@@ -2752,7 +2752,7 @@ export const SuperAdminView: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 mb-1">المفتاح السري (Secret Access Key)</label>
                 <input
                   type="password"
-                  placeholder="R2 Secret Access Key"
+                  placeholder={r2ConfigTenant.hasR2SecretKey ? "•••••••••••• (محفوظ - اتركه فارغاً للإبقاء عليه)" : "R2 Secret Access Key"}
                   value={r2ConfigForm.r2SecretAccessKey}
                   onChange={(e) => setR2ConfigForm({ ...r2ConfigForm, r2SecretAccessKey: e.target.value })}
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-indigo-500 outline-none"
@@ -2842,11 +2842,10 @@ export const SuperAdminView: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 mb-1">المفتاح السري (Secret Access Key)</label>
                 <input
                   type="password"
-                  placeholder="R2 Secret Access Key"
+                  placeholder={backupReport?.masterR2?.hasSecretKey || backupReport?.masterR2?.isConfigured ? "•••••••••••• (محفوظ ومقنّع - اتركه فارغاً للإبقاء عليه)" : "R2 Secret Access Key"}
                   value={masterR2Form.r2SecretAccessKey}
                   onChange={(e) => setMasterR2Form({ ...masterR2Form, r2SecretAccessKey: e.target.value })}
                   className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-indigo-500 outline-none"
-                  required
                 />
               </div>
 

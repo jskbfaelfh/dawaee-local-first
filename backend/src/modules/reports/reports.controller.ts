@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Param, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ReportsService } from './reports.service';
 import { DateRangeDto } from './dto/date-range.dto';
@@ -55,5 +55,23 @@ export class ReportsController {
   @Get('smart-stock-forecast')
   async getSmartStockPredictionReport() {
     return this.reportsService.getSmartStockPredictionReport();
+  }
+
+  @Get('shifts-audit')
+  async getShiftsAuditReport(@Query() query: DateRangeDto) {
+    return this.reportsService.getShiftsAuditReport(query);
+  }
+
+  @Get('returns-audit')
+  async getReturnsAuditReport(@Query() query: DateRangeDto) {
+    return this.reportsService.getReturnsAuditReport(query);
+  }
+
+  @Get('medicine-kardex/:inventoryItemId')
+  async getMedicineKardex(
+    @Param('inventoryItemId') inventoryItemId: string,
+    @Query() query: DateRangeDto,
+  ) {
+    return this.reportsService.getMedicineKardex(inventoryItemId, query);
   }
 }

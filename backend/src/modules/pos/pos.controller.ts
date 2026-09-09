@@ -7,6 +7,7 @@ import {
   Query,
   UseGuards,
   Request,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { PosService } from './pos.service';
@@ -33,6 +34,11 @@ export class PosController {
     return this.posService.processReturn(dto);
   }
 
+  @Get('returns')
+  async getRecentReturns(@Query('limit') limit?: number) {
+    return this.posService.getRecentReturns(limit ? Number(limit) : 20);
+  }
+
   @Get('daily-summary')
   async getDailySummary() {
     return this.posService.getDailySummary();
@@ -44,7 +50,7 @@ export class PosController {
   }
 
   @Get('sales/:id')
-  async getSaleById(@Param('id') id: string) {
+  async getSaleById(@Param('id', new ParseUUIDPipe({ errorHttpStatusCode: 400 })) id: string) {
     return this.posService.getSaleById(id);
   }
 

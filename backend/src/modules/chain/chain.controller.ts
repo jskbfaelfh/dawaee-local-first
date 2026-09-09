@@ -6,6 +6,7 @@ import {
   Param,
   Query,
   UseGuards,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ChainService } from './chain.service';
@@ -36,7 +37,7 @@ export class ChainController {
   }
 
   @Get('cross-stock/:medicineId')
-  async checkCrossBranchStock(@Param('medicineId') medicineId: string) {
+  async checkCrossBranchStock(@Param('medicineId', new ParseUUIDPipe({ version: '4' })) medicineId: string) {
     return this.chainService.checkCrossBranchStock(medicineId);
   }
 
@@ -54,7 +55,7 @@ export class ChainController {
   @Post('transfers/:id/receive')
   @Roles('OWNER')
   async receiveStockTransfer(
-    @Param('id') id: string,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
     @Body() dto: ReceiveStockTransferDto,
   ) {
     return this.chainService.receiveStockTransfer(id, dto);
@@ -62,7 +63,7 @@ export class ChainController {
 
   @Post('transfers/:id/cancel')
   @Roles('OWNER')
-  async cancelStockTransfer(@Param('id') id: string) {
+  async cancelStockTransfer(@Param('id', new ParseUUIDPipe({ version: '4' })) id: string) {
     return this.chainService.cancelStockTransfer(id);
   }
 }

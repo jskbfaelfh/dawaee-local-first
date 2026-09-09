@@ -9,6 +9,7 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
+import { maskSecretKey, isWeakPassword } from '../../common/utils/security.util';
 import {
   UpdatePharmacyProfileDto,
   ChangeOwnerPasswordDto,
@@ -82,8 +83,11 @@ export class ProfileService {
         showPhoneNumber: (tenant as any).showPhoneNumber ?? true,
         showWhatsapp: (tenant as any).showWhatsapp ?? true,
         is24Hours: (tenant as any).is24Hours ?? false,
-        geminiApiKey: (tenant as any).geminiApiKey || '',
-        licenseKey: tenant.licenseKey,
+        hasGeminiApiKey: Boolean((tenant as any).geminiApiKey),
+        geminiApiKeyMasked: maskSecretKey((tenant as any).geminiApiKey),
+        geminiApiKey: '', // Sensitive secret NEVER returned to frontend!
+        licenseKey: maskSecretKey(tenant.licenseKey),
+        licenseKeyMasked: maskSecretKey(tenant.licenseKey),
         subscriptionStatus: tenant.subscriptionStatus,
         subscriptionEndsAt: tenant.subscriptionEndsAt,
         daysRemaining,
@@ -114,7 +118,18 @@ export class ProfileService {
     if (dto.showPhoneNumber !== undefined) updateData.showPhoneNumber = dto.showPhoneNumber;
     if (dto.showWhatsapp !== undefined) updateData.showWhatsapp = dto.showWhatsapp;
     if (dto.is24Hours !== undefined) updateData.is24Hours = dto.is24Hours;
-    if (dto.geminiApiKey !== undefined) updateData.geminiApiKey = dto.geminiApiKey?.trim() || null;
+
+    if (dto.geminiApiKey !== undefined) {
+      const raw = dto.geminiApiKey?.trim();
+      if (raw && !raw.includes('••••') && !raw.startsWith('•••')) {
+        // New valid key provided
+        updateData.geminiApiKey = raw;
+      } else if (raw === '' || raw === '__REMOVE__') {
+        // Explicit removal
+        updateData.geminiApiKey = null;
+      }
+      // If raw contains mask characters (••••), ignore it to preserve existing valid key
+    }
 
     const updated = await this.prisma.tenant.update({
       where: { id: tenantId },
@@ -140,10 +155,19 @@ export class ProfileService {
 
     this.logger.log(`Pharmacy profile updated for tenant ${tenantId}`);
 
+    const sanitizedPharmacy = {
+      ...updated,
+      geminiApiKey: '',
+      hasGeminiApiKey: Boolean((updated as any).geminiApiKey),
+      geminiApiKeyMasked: maskSecretKey((updated as any).geminiApiKey),
+      licenseKey: maskSecretKey(updated.licenseKey),
+      licenseKeyMasked: maskSecretKey(updated.licenseKey),
+    };
+
     return {
       success: true,
       message: 'تم تحديث بيانات وإعدادات خصوصية الصيدلية بنجاح',
-      pharmacy: updated,
+      pharmacy: sanitizedPharmacy,
     };
   }
 
@@ -177,6 +201,11 @@ export class ProfileService {
       throw new BadRequestException('كلمة المرور الحالية غير صحيحة');
     }
 
+    const weakCheck = isWeakPassword(dto.newPassword);
+    if (weakCheck.isWeak) {
+      throw new BadRequestException(weakCheck.reason || 'كلمة المرور الجديدة ضعيفة جداً');
+    }
+
     // 3. Hash new password and update
     const newHash = await bcrypt.hash(dto.newPassword, 10);
     await this.prisma.$executeRawUnsafe(
@@ -198,6 +227,11 @@ export class ProfileService {
    */
   async createCashier(dto: CreateCashierDto) {
     const schemaName = this.tenantContext.getSchemaName();
+
+    const weakCheck = isWeakPassword(dto.password);
+    if (weakCheck.isWeak) {
+      throw new BadRequestException(weakCheck.reason || 'كلمة مرور الكاشير غير آمنة');
+    }
 
     const cleanUsername = dto.username.toLowerCase().trim();
 
@@ -242,6 +276,11 @@ export class ProfileService {
    */
   async resetCashierPassword(cashierId: string, dto: ResetCashierPasswordDto) {
     const schemaName = this.tenantContext.getSchemaName();
+
+    const weakCheck = isWeakPassword(dto.newPassword);
+    if (weakCheck.isWeak) {
+      throw new BadRequestException(weakCheck.reason || 'كلمة المرور الجديدة ضعيفة جداً');
+    }
 
     // Verify it's a cashier
     const rows: any[] = await this.prisma.$queryRawUnsafe(

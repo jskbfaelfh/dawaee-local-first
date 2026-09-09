@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../../database/prisma.service";
 import * as zlib from "zlib";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { maskSecretKey, encryptSecret, decryptSecret } from "../../common/utils/security.util";
 
 export interface BackupResult {
   tenantId: string;
@@ -13,6 +14,7 @@ export interface BackupResult {
   uploadedToMaster?: boolean;
   uploadedToPharmacyR2?: boolean;
   error?: string;
+  manifest?: Record<string, any>;
 }
 
 @Injectable()
@@ -39,141 +41,131 @@ export class R2BackupService {
   }
 
   /**
-   * Extract Full Isolated Schema Data for a given Tenant
+   * Extract Full Isolated Schema Data for a given Tenant covering all 16 system tables.
+   * Strictly avoids silent swallowing (catch {}) on existing tables.
    */
   private async extractTenantData(tenant: any): Promise<any> {
     const schemaName = tenant.schemaName;
 
-    // Check if schema exists
+    // 1. Verify that tenant schema actually exists
     const schemaCheck: any[] = await this.prisma.$queryRawUnsafe(`
       SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1;
     `, schemaName);
 
-    const hasSchema = schemaCheck.length > 0;
-
-    let users: any[] = [];
-    let inventoryItems: any[] = [];
-    let inventoryBatches: any[] = [];
-    let suppliers: any[] = [];
-    let supplierInvoices: any[] = [];
-    let supplierPayments: any[] = [];
-    let sales: any[] = [];
-    let saleItems: any[] = [];
-    let returns: any[] = [];
-
-    if (hasSchema) {
-      // 1. Users
-      try {
-        users = await this.prisma.$queryRawUnsafe(`
-          SELECT id, name, username, password_hash as "passwordHash", role, is_active as "isActive", created_at as "createdAt"
-          FROM "${schemaName}".users;
-        `);
-      } catch {}
-
-      // 2. Inventory Items & Batches
-      try {
-        inventoryItems = await this.prisma.$queryRawUnsafe(`
-          SELECT 
-            ii.id,
-            ii.medicine_id as "medicineId",
-            ii.units_per_pack as "unitsPerPack",
-            ii.selling_price_pack as "sellingPricePack",
-            ii.selling_price_unit as "sellingPriceUnit",
-            ii.min_alert_units as "minAlertUnits",
-            ii.custom_name as "customName",
-            m.trade_name as "tradeName",
-            m.scientific_name as "scientificName",
-            m.barcode,
-            m.dosage_form as "dosageForm",
-            m.strength
-          FROM "${schemaName}".inventory_items ii
-          JOIN public.medicines m ON ii.medicine_id = m.id;
-        `);
-      } catch {}
-
-      try {
-        inventoryBatches = await this.prisma.$queryRawUnsafe(`
-          SELECT 
-            id,
-            inventory_item_id as "inventoryItemId",
-            batch_number as "batchNumber",
-            purchase_price_pack as "purchasePricePack",
-            quantity_units_remaining as "quantityUnitsRemaining",
-            expiry_date as "expiryDate",
-            created_at as "createdAt"
-          FROM "${schemaName}".inventory_batches;
-        `);
-      } catch {}
-
-      // 3. Suppliers, Invoices & Payments
-      try {
-        suppliers = await this.prisma.$queryRawUnsafe(`
-          SELECT id, name, phone, address, contact_person as "contactPerson", notes, created_at as "createdAt"
-          FROM "${schemaName}".suppliers;
-        `);
-        supplierInvoices = await this.prisma.$queryRawUnsafe(`
-          SELECT id, supplier_id as "supplierId", invoice_number as "invoiceNumber", invoice_date as "invoiceDate",
-                 total_amount as "totalAmount", paid_amount as "paidAmount", remaining_amount as "remainingAmount",
-                 status, notes, due_date as "dueDate", created_at as "createdAt"
-          FROM "${schemaName}".supplier_invoices;
-        `);
-        supplierPayments = await this.prisma.$queryRawUnsafe(`
-          SELECT id, supplier_id as "supplierId", supplier_invoice_id as "supplierInvoiceId", amount,
-                 payment_date as "paymentDate", payment_method as "paymentMethod", receipt_number as "receiptNumber",
-                 notes, created_at as "createdAt"
-          FROM "${schemaName}".supplier_payments;
-        `);
-      } catch {}
-
-      // 4. Sales & Sale Items
-      try {
-        sales = await this.prisma.$queryRawUnsafe(`
-          SELECT id, invoice_number as "invoiceNumber", user_id as "userId", subtotal,
-                 discount_amount as "discountAmount", total_amount as "totalAmount", created_at as "createdAt"
-          FROM "${schemaName}".sales
-          ORDER BY created_at DESC;
-        `);
-        saleItems = await this.prisma.$queryRawUnsafe(`
-          SELECT id, sale_id as "saleId", inventory_item_id as "inventoryItemId", inventory_batch_id as "inventoryBatchId",
-                 unit_type as "unitType", quantity, unit_price as "unitPrice", total_price as "totalPrice"
-          FROM "${schemaName}".sale_items;
-        `);
-      } catch {}
-
-      // 5. Returns
-      try {
-        returns = await this.prisma.$queryRawUnsafe(`
-          SELECT id, sale_id as "saleId", inventory_item_id as "inventoryItemId", user_id as "userId",
-                 unit_type as "unitType", quantity, refund_amount as "refundAmount", reason, created_at as "createdAt"
-          FROM "${schemaName}".returns;
-        `);
-      } catch {}
+    if (!schemaCheck || schemaCheck.length === 0) {
+      throw new Error(`مخطط الصيدلية (${schemaName}) غير موجود في قاعدة البيانات`);
     }
 
-    // 6. Central search index items
+    // 2. Discover all tables currently provisioned in this tenant schema
+    const tableRows: any[] = await this.prisma.$queryRawUnsafe(`
+      SELECT table_name FROM information_schema.tables WHERE table_schema = $1;
+    `, schemaName);
+    const existingTables = new Set(tableRows.map((r: any) => r.table_name));
+
+    // Helper: extracts table data if table exists; throws immediately if query fails!
+    const extractTable = async (tableName: string, customSql?: string): Promise<any[]> => {
+      if (!existingTables.has(tableName)) {
+        return [];
+      }
+      try {
+        const sql = customSql || `SELECT * FROM "${schemaName}"."${tableName}";`;
+        return await this.prisma.$queryRawUnsafe(sql);
+      } catch (err: any) {
+        this.logger.error(`Critical error extracting table "${tableName}" from schema "${schemaName}": ${err.message}`);
+        throw new Error(`فشل استخراج بيانات جدول (${tableName}) من قاعدة بيانات الصيدلية: ${err.message}`);
+      }
+    };
+
+    // 3. Extract all 16 system tables
+    const users = await extractTable("users", `
+      SELECT id, name, username, password_hash as "passwordHash", role, is_active as "isActive", created_at as "createdAt"
+      FROM "${schemaName}".users;
+    `);
+
+    const inventoryItems = await extractTable("inventory_items", `
+      SELECT 
+        ii.*,
+        m.trade_name as "tradeName",
+        m.scientific_name as "scientificName",
+        m.barcode,
+        m.dosage_form as "dosageForm",
+        m.strength
+      FROM "${schemaName}".inventory_items ii
+      LEFT JOIN public.medicines m ON ii.medicine_id = m.id;
+    `);
+
+    const inventoryBatches = await extractTable("inventory_batches");
+    const suppliers = await extractTable("suppliers");
+    const purchases = await extractTable("purchases", `SELECT * FROM "${schemaName}".purchases ORDER BY created_at DESC;`);
+    const purchaseItems = await extractTable("purchase_items");
+    const purchaseInvoices = await extractTable("purchase_invoices", `SELECT * FROM "${schemaName}".purchase_invoices ORDER BY created_at DESC;`);
+    const purchaseInvoiceItems = await extractTable("purchase_invoice_items");
+    const supplierPayments = await extractTable("supplier_payments", `SELECT * FROM "${schemaName}".supplier_payments ORDER BY created_at DESC;`);
+    const sales = await extractTable("sales", `SELECT * FROM "${schemaName}".sales ORDER BY created_at DESC;`);
+    const saleItems = await extractTable("sale_items");
+    const returns = await extractTable("returns", `SELECT * FROM "${schemaName}".returns ORDER BY created_at DESC;`);
+    const expenses = await extractTable("expenses", `SELECT * FROM "${schemaName}".expenses ORDER BY created_at DESC;`);
+    const shiftLogs = await extractTable("shift_logs", `SELECT * FROM "${schemaName}".shift_logs ORDER BY opened_at DESC;`);
+    const stocktakeSessions = await extractTable("stocktake_sessions", `SELECT * FROM "${schemaName}".stocktake_sessions ORDER BY created_at DESC;`);
+    const stocktakeItems = await extractTable("stocktake_items");
+
+    // 4. Central search index items
     const searchIndexItems = await this.prisma.centralSearchIndex.findMany({
       where: { tenantId: tenant.id },
     });
 
+    const manifest = {
+      totalTablesInSchema: existingTables.size,
+      tables: Array.from(existingTables),
+      counts: {
+        users: users.length,
+        inventoryItems: inventoryItems.length,
+        inventoryBatches: inventoryBatches.length,
+        suppliers: suppliers.length,
+        purchases: purchases.length,
+        purchaseItems: purchaseItems.length,
+        purchaseInvoices: purchaseInvoices.length,
+        purchaseInvoiceItems: purchaseInvoiceItems.length,
+        supplierPayments: supplierPayments.length,
+        sales: sales.length,
+        saleItems: saleItems.length,
+        returns: returns.length,
+        expenses: expenses.length,
+        shiftLogs: shiftLogs.length,
+        stocktakeSessions: stocktakeSessions.length,
+        stocktakeItems: stocktakeItems.length,
+        searchIndexItems: searchIndexItems.length,
+      },
+      extractedAt: new Date().toISOString(),
+    };
+
     return {
-      version: "1.0",
+      version: "2.0",
       system: "DAWAEE_CLOUD_R2_BACKUP",
       tenantId: tenant.id,
       tenantName: tenant.name,
       tenantSlug: tenant.slug,
       schemaName: tenant.schemaName,
-      hasSchema,
+      hasSchema: true,
       exportedAt: new Date().toISOString(),
+      manifest,
       data: {
         users,
         inventoryItems,
         inventoryBatches,
         suppliers,
-        supplierInvoices,
+        purchases,
+        purchaseItems,
+        purchaseInvoices,
+        purchaseInvoiceItems,
         supplierPayments,
         sales,
         saleItems,
         returns,
+        expenses,
+        shiftLogs,
+        stocktakeSessions,
+        stocktakeItems,
         searchIndexItems,
       },
     };
@@ -249,12 +241,16 @@ export class R2BackupService {
       }
 
       // 3. Upload to Pharmacy-specific Cloudflare R2 (If configured)
-      if (tenant.r2BucketName && tenant.r2AccountId && tenant.r2AccessKeyId && tenant.r2SecretAccessKey) {
+      const pharmacyAccount = decryptSecret(tenant.r2AccountId);
+      const pharmacyAccessKey = decryptSecret(tenant.r2AccessKeyId);
+      const pharmacySecret = decryptSecret(tenant.r2SecretAccessKey);
+
+      if (tenant.r2BucketName && pharmacyAccount && pharmacyAccessKey && pharmacySecret) {
         try {
           const pharmacyClient = this.getR2Client(
-            tenant.r2AccountId,
-            tenant.r2AccessKeyId,
-            tenant.r2SecretAccessKey,
+            pharmacyAccount,
+            pharmacyAccessKey,
+            pharmacySecret,
           );
           const pharmacyKey = `backups/backup_${dateStr}.json.gz`;
           await pharmacyClient.send(
@@ -289,6 +285,7 @@ export class R2BackupService {
         sizeKb,
         uploadedToMaster,
         uploadedToPharmacyR2,
+        manifest: rawData.manifest,
       };
     } catch (err: any) {
       this.logger.error(`❌ Error backing up tenant ${tenant.name}: ${err.message}`);
@@ -352,6 +349,7 @@ export class R2BackupService {
 
   /**
    * Super Admin Monitoring Summary
+   * Strips raw access keys and secrets to prevent leaking credentials in monitoring dashboards.
    */
   async getBackupsMonitoringSummary() {
     const tenants = await this.prisma.tenant.findMany({
@@ -420,8 +418,10 @@ export class R2BackupService {
       },
       masterR2: {
         r2BucketName: masterR2.r2BucketName,
-        r2AccountId: masterR2.r2AccountId,
-        r2AccessKeyId: masterR2.r2AccessKeyId,
+        r2AccountIdMasked: maskSecretKey(masterR2.r2AccountId),
+        r2AccessKeyIdMasked: maskSecretKey(masterR2.r2AccessKeyId),
+        hasAccessKey: Boolean(masterR2.r2AccessKeyId),
+        hasSecretKey: Boolean(masterR2.r2SecretAccessKey),
         isConfigured: masterR2.isConfigured,
         source: masterR2.source,
       },
@@ -431,6 +431,7 @@ export class R2BackupService {
 
   /**
    * Retrieve Master R2 configuration (from DB SystemSettings, with fallback to env)
+   * Automatically decrypts AES-256-GCM encrypted database credentials
    */
   async getMasterR2Config(): Promise<{
     r2BucketName: string;
@@ -459,9 +460,9 @@ export class R2BackupService {
       if (dbBucket && dbAccount && dbAccessKey && dbSecretKey) {
         return {
           r2BucketName: dbBucket,
-          r2AccountId: dbAccount,
-          r2AccessKeyId: dbAccessKey,
-          r2SecretAccessKey: dbSecretKey,
+          r2AccountId: decryptSecret(dbAccount),
+          r2AccessKeyId: decryptSecret(dbAccessKey),
+          r2SecretAccessKey: decryptSecret(dbSecretKey),
           isConfigured: true,
           source: "DATABASE",
         };
@@ -497,7 +498,36 @@ export class R2BackupService {
   }
 
   /**
-   * Save Master R2 configuration into DB SystemSettings
+   * Retrieve Master R2 public configuration for admin client display (WITH MASKED ACCESS AND SECRET KEYS)
+   * Prevents leaking plaintext Cloudflare/AWS Access Key and Secret Key over REST API
+   */
+  async getMasterR2PublicConfig(): Promise<{
+    r2BucketName: string;
+    r2AccountIdMasked: string;
+    r2AccessKeyIdMasked: string;
+    r2SecretAccessKeyMasked: string;
+    hasAccountId: boolean;
+    hasAccessKey: boolean;
+    hasSecretKey: boolean;
+    isConfigured: boolean;
+    source: "DATABASE" | "ENV" | "NONE";
+  }> {
+    const full = await this.getMasterR2Config();
+    return {
+      r2BucketName: full.r2BucketName,
+      r2AccountIdMasked: maskSecretKey(full.r2AccountId),
+      r2AccessKeyIdMasked: maskSecretKey(full.r2AccessKeyId),
+      r2SecretAccessKeyMasked: maskSecretKey(full.r2SecretAccessKey),
+      hasAccountId: Boolean(full.r2AccountId),
+      hasAccessKey: Boolean(full.r2AccessKeyId),
+      hasSecretKey: Boolean(full.r2SecretAccessKey),
+      isConfigured: full.isConfigured,
+      source: full.source,
+    };
+  }
+
+  /**
+   * Save Master R2 configuration into DB SystemSettings with AES-256-GCM encryption
    */
   async saveMasterR2Config(dto: {
     r2BucketName: string;
@@ -505,12 +535,29 @@ export class R2BackupService {
     r2AccessKeyId: string;
     r2SecretAccessKey: string;
   }) {
-    const entries = [
-      { key: "R2_BUCKET_NAME", value: (dto.r2BucketName || "dawaee-backups").trim() },
-      { key: "R2_ACCOUNT_ID", value: (dto.r2AccountId || "").trim() },
-      { key: "R2_ACCESS_KEY_ID", value: (dto.r2AccessKeyId || "").trim() },
-      { key: "R2_SECRET_ACCESS_KEY", value: (dto.r2SecretAccessKey || "").trim() },
+    const rawBucket = (dto.r2BucketName || "dawaee-backups").trim();
+    const rawAccount = (dto.r2AccountId || "").trim();
+    const rawAccessKey = (dto.r2AccessKeyId || "").trim();
+    const rawSecret = (dto.r2SecretAccessKey || "").trim();
+
+    const entries: { key: string; value: string }[] = [
+      { key: "R2_BUCKET_NAME", value: rawBucket },
     ];
+
+    // Only update R2_ACCOUNT_ID if not masked and not empty
+    if (rawAccount && !rawAccount.startsWith("•••") && !rawAccount.includes("••••")) {
+      entries.push({ key: "R2_ACCOUNT_ID", value: encryptSecret(rawAccount) });
+    }
+
+    // Only update R2_ACCESS_KEY_ID if not masked and not empty
+    if (rawAccessKey && !rawAccessKey.startsWith("•••") && !rawAccessKey.includes("••••")) {
+      entries.push({ key: "R2_ACCESS_KEY_ID", value: encryptSecret(rawAccessKey) });
+    }
+
+    // Only update R2_SECRET_ACCESS_KEY if not masked and not empty
+    if (rawSecret && !rawSecret.startsWith("•••") && !rawSecret.includes("••••")) {
+      entries.push({ key: "R2_SECRET_ACCESS_KEY", value: encryptSecret(rawSecret) });
+    }
 
     for (const entry of entries) {
       if (entry.value) {
@@ -522,7 +569,7 @@ export class R2BackupService {
       }
     }
 
-    this.logger.log("✅ Master Cloudflare R2 credentials updated in database.");
-    return { success: true, message: "تم حفظ إعدادات Cloudflare R2 المركزية بنجاح" };
+    this.logger.log("✅ Master Cloudflare R2 credentials safely encrypted and updated in database.");
+    return { success: true, message: "تم حفظ وتشفير إعدادات Cloudflare R2 المركزية بنجاح" };
   }
 }

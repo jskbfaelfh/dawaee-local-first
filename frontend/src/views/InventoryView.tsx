@@ -1151,6 +1151,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
                         <b className="font-mono text-sm text-slate-900 font-black">#{b.batchNumber}</b>
+                        {b.isBonus && (
+                          <span className="px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-md text-[10px] font-black">
+                            🎁 وجبة بونص
+                          </span>
+                        )}
                         {b.isRecalled && (
                           <span className="px-2 py-0.5 bg-rose-100 text-rose-700 border border-rose-200 rounded-md text-[10px] font-black">
                             ⛔ مسحوبة
@@ -1165,7 +1170,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({ onNavigateToExpiry
                       <div className="flex items-center gap-3 text-[11px] text-slate-500">
                         <span>الصلاحية: <b className="text-slate-800 font-mono">{new Date(b.expiryDate).toLocaleDateString('ar-IQ')}</b></span>
                         <span>•</span>
-                        <span>شراء: <b className="text-emerald-700 font-mono font-bold">{Number(b.purchasePricePack).toLocaleString()} د.ع</b></span>
+                        <span>شراء: <b className="text-emerald-700 font-mono font-bold">{b.isBonus ? '0 د.ع (بونص مجاني)' : `${Number(b.purchasePricePack).toLocaleString()} د.ع`}</b></span>
                       </div>
                     </div>
 

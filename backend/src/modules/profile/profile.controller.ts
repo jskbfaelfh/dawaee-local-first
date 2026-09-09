@@ -26,6 +26,7 @@ export class ProfileController {
   constructor(private readonly profileService: ProfileService) {}
 
   @Get()
+  @Roles('OWNER')
   async getPharmacyProfile() {
     return this.profileService.getPharmacyProfile();
   }

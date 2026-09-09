@@ -92,6 +92,7 @@ model StockTransfer {
   purchasePricePack  Decimal   @map("purchase_price_pack") @db.Decimal(12, 2)
   status             String    @default("PENDING") @map("status") @db.VarChar(50)
   notes              String?   @db.Text
+  batchAllocations   Json?     @map("batch_allocations")
   senderUserName     String?   @map("sender_user_name") @db.VarChar(100)
   receiverUserName   String?   @map("receiver_user_name") @db.VarChar(100)
   createdAt          DateTime  @default(now()) @map("created_at")

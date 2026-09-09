@@ -328,122 +328,140 @@ export class ChainService {
   }
 
   /**
-   * Create an inter-branch stock transfer (Deduct from source and create PENDING transfer)
+   * Create an inter-branch stock transfer (Deduct from source and create PENDING transfer atomically)
    */
   async createStockTransfer(dto: CreateStockTransferDto) {
     const tenantId = this.tenantContext.getTenantId();
     const schemaName = this.tenantContext.getSchemaName();
     const ctx = this.tenantContext.getContext();
 
-    const currentTenant = await this.prisma.tenant.findUnique({
-      where: { id: tenantId },
+    return this.prisma.$transaction(async (tx) => {
+      const currentTenant = await tx.tenant.findUnique({
+        where: { id: tenantId },
+      });
+
+      if (!currentTenant || !currentTenant.chainId) {
+        throw new BadRequestException('يجب أن تكون الصيدلية مرتبطة بسلسلة فروع لإجراء مناقلة مخزنية');
+      }
+
+      const targetTenant = await tx.tenant.findUnique({
+        where: { id: dto.targetTenantId },
+      });
+
+      if (!targetTenant || targetTenant.chainId !== currentTenant.chainId) {
+        throw new BadRequestException('الفرع المستلم غير مسجل ضمن نفس السلسلة');
+      }
+
+      if (targetTenant.id === currentTenant.id) {
+        throw new BadRequestException('لا يمكن التحويل لنفس الفرع');
+      }
+
+      // 1. Check medicine & available batch in source schema
+      const itemRows: any[] = await tx.$queryRawUnsafe(`
+        SELECT i.id, i.units_per_pack, COALESCE(i.custom_name, m.trade_name) as "tradeName"
+        FROM "${schemaName}".inventory_items i
+        JOIN public.medicines m ON i.medicine_id = m.id
+        WHERE i.medicine_id = $1::uuid
+        LIMIT 1;
+      `, dto.medicineId);
+
+      if (itemRows.length === 0) {
+        throw new NotFoundException('الدواء غير موجود في مخزون الفرع الحالي');
+      }
+
+      const item = itemRows[0];
+      const unitsPerPack = item.units_per_pack || 1;
+      const totalUnitsToTransfer = (dto.quantityPacks * unitsPerPack) + (dto.quantityUnits || 0);
+
+      // 2. Fetch and LOCK source batches to deduct from (FIFO)
+      let batchQuery = `
+        SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack
+        FROM "${schemaName}".inventory_batches
+        WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
+      `;
+      const params: any[] = [item.id];
+
+      if (dto.batchNumber) {
+        batchQuery += ` AND batch_number = $2`;
+        params.push(dto.batchNumber);
+      }
+      batchQuery += ` ORDER BY expiry_date ASC, id ASC FOR UPDATE;`;
+
+      const availableBatches: any[] = await tx.$queryRawUnsafe(batchQuery, ...params);
+      const totalAvailable = availableBatches.reduce((sum, b) => sum + Number(b.quantity_units_remaining), 0);
+
+      if (totalAvailable < totalUnitsToTransfer) {
+        throw new BadRequestException(`الكمية المتوفرة في المخزون (${totalAvailable} وحدة) أقل من الكمية المراد تحويلها (${totalUnitsToTransfer} وحدة)`);
+      }
+
+      // 3. Deduct from source batches and record exact multi-batch allocations
+      let remainingToDeduct = totalUnitsToTransfer;
+      let selectedBatchNumber = dto.batchNumber || null;
+      let selectedExpiry: any = null;
+      let avgPurchasePrice = 0;
+      const batchAllocations: Array<{
+        batchId: string;
+        batchNumber: string;
+        expiryDate: string | null;
+        units: number;
+        purchasePricePack: number;
+      }> = [];
+
+      for (const b of availableBatches) {
+        if (remainingToDeduct <= 0) break;
+        const bUnits = Number(b.quantity_units_remaining);
+        const deductFromThis = Math.min(bUnits, remainingToDeduct);
+
+        await tx.$executeRawUnsafe(`
+          UPDATE "${schemaName}".inventory_batches
+          SET quantity_units_remaining = quantity_units_remaining - $1
+          WHERE id = $2::uuid;
+        `, deductFromThis, b.id);
+
+        remainingToDeduct -= deductFromThis;
+        if (!selectedBatchNumber) selectedBatchNumber = b.batch_number;
+        if (!selectedExpiry) selectedExpiry = b.expiry_date;
+        avgPurchasePrice = Number(b.purchase_price_pack || 0);
+
+        batchAllocations.push({
+          batchId: b.id,
+          batchNumber: b.batch_number,
+          expiryDate: b.expiry_date ? new Date(b.expiry_date).toISOString().slice(0, 10) : null,
+          units: deductFromThis,
+          purchasePricePack: Number(b.purchase_price_pack || 0),
+        });
+      }
+
+      // 4. Create StockTransfer record in Master DB with batchAllocations
+      const transferNumber = `TRF-${Date.now().toString().slice(-6)}`;
+      const transfer = await tx.stockTransfer.create({
+        data: {
+          transferNumber,
+          chainId: currentTenant.chainId,
+          sourceTenantId: currentTenant.id,
+          targetTenantId: targetTenant.id,
+          sourcePharmacyName: currentTenant.name,
+          targetPharmacyName: targetTenant.name,
+          medicineId: dto.medicineId,
+          tradeName: item.tradeName,
+          batchNumber: selectedBatchNumber,
+          expiryDate: selectedExpiry ? new Date(selectedExpiry) : null,
+          quantityPacks: dto.quantityPacks,
+          quantityUnits: totalUnitsToTransfer,
+          purchasePricePack: avgPurchasePrice,
+          status: 'PENDING',
+          notes: dto.notes || null,
+          batchAllocations: batchAllocations as any,
+          senderUserName: (ctx as any)?.name || 'صاحب الصيدلية',
+        },
+      });
+
+      return {
+        success: true,
+        message: `تم إنشاء سند المناقلة رقم (${transferNumber}) وإرسال الشحنة إلى (${targetTenant.name}) بنجاح`,
+        transfer,
+      };
     });
-
-    if (!currentTenant || !currentTenant.chainId) {
-      throw new BadRequestException('يجب أن تكون الصيدلية مرتبطة بسلسلة فروع لإجراء مناقلة مخزنية');
-    }
-
-    const targetTenant = await this.prisma.tenant.findUnique({
-      where: { id: dto.targetTenantId },
-    });
-
-    if (!targetTenant || targetTenant.chainId !== currentTenant.chainId) {
-      throw new BadRequestException('الفرع المستلم غير مسجل ضمن نفس السلسلة');
-    }
-
-    if (targetTenant.id === currentTenant.id) {
-      throw new BadRequestException('لا يمكن التحويل لنفس الفرع');
-    }
-
-    // 1. Check medicine & available batch in source schema
-    const itemRows: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT i.id, i.units_per_pack, COALESCE(i.custom_name, m.trade_name) as "tradeName"
-      FROM "${schemaName}".inventory_items i
-      JOIN public.medicines m ON i.medicine_id = m.id
-      WHERE i.medicine_id = $1::uuid
-      LIMIT 1;
-    `, dto.medicineId);
-
-    if (itemRows.length === 0) {
-      throw new NotFoundException('الدواء غير موجود في مخزون الفرع الحالي');
-    }
-
-    const item = itemRows[0];
-    const unitsPerPack = item.units_per_pack || 1;
-    const totalUnitsToTransfer = (dto.quantityPacks * unitsPerPack) + (dto.quantityUnits || 0);
-
-    // 2. Fetch source batches to deduct from (FIFO)
-    let batchQuery = `
-      SELECT id, batch_number, expiry_date, quantity_units_remaining, purchase_price_pack
-      FROM "${schemaName}".inventory_batches
-      WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
-    `;
-    const params: any[] = [item.id];
-
-    if (dto.batchNumber) {
-      batchQuery += ` AND batch_number = $2`;
-      params.push(dto.batchNumber);
-    }
-    batchQuery += ` ORDER BY expiry_date ASC;`;
-
-    const availableBatches: any[] = await this.prisma.$queryRawUnsafe(batchQuery, ...params);
-    const totalAvailable = availableBatches.reduce((sum, b) => sum + Number(b.quantity_units_remaining), 0);
-
-    if (totalAvailable < totalUnitsToTransfer) {
-      throw new BadRequestException(`الكمية المتوفرة في المخزون (${totalAvailable} وحدة) أقل من الكمية المراد تحويلها (${totalUnitsToTransfer} وحدة)`);
-    }
-
-    // 3. Deduct from source batches
-    let remainingToDeduct = totalUnitsToTransfer;
-    let selectedBatchNumber = dto.batchNumber || null;
-    let selectedExpiry: any = null;
-    let avgPurchasePrice = 0;
-
-    for (const b of availableBatches) {
-      if (remainingToDeduct <= 0) break;
-      const bUnits = Number(b.quantity_units_remaining);
-      const deductFromThis = Math.min(bUnits, remainingToDeduct);
-
-      await this.prisma.$executeRawUnsafe(`
-        UPDATE "${schemaName}".inventory_batches
-        SET quantity_units_remaining = quantity_units_remaining - $1
-        WHERE id = $2::uuid;
-      `, deductFromThis, b.id);
-
-      remainingToDeduct -= deductFromThis;
-      if (!selectedBatchNumber) selectedBatchNumber = b.batch_number;
-      if (!selectedExpiry) selectedExpiry = b.expiry_date;
-      avgPurchasePrice = Number(b.purchase_price_pack || 0);
-    }
-
-    // 4. Create StockTransfer record in Master DB
-    const transferNumber = `TRF-${Date.now().toString().slice(-6)}`;
-    const transfer = await this.prisma.stockTransfer.create({
-      data: {
-        transferNumber,
-        chainId: currentTenant.chainId,
-        sourceTenantId: currentTenant.id,
-        targetTenantId: targetTenant.id,
-        sourcePharmacyName: currentTenant.name,
-        targetPharmacyName: targetTenant.name,
-        medicineId: dto.medicineId,
-        tradeName: item.tradeName,
-        batchNumber: selectedBatchNumber,
-        expiryDate: selectedExpiry ? new Date(selectedExpiry) : null,
-        quantityPacks: dto.quantityPacks,
-        quantityUnits: totalUnitsToTransfer,
-        purchasePricePack: avgPurchasePrice,
-        status: 'PENDING',
-        notes: dto.notes || null,
-        senderUserName: (ctx as any)?.name || 'صاحب الصيدلية',
-      },
-    });
-
-    return {
-      success: true,
-      message: `تم إنشاء سند المناقلة رقم (${transferNumber}) وإرسال الشحنة إلى (${targetTenant.name}) بنجاح`,
-      transfer,
-    };
   }
 
   /**
@@ -454,165 +472,255 @@ export class ChainService {
     const schemaName = this.tenantContext.getSchemaName();
     const ctx = this.tenantContext.getContext();
 
-    const transfer = await this.prisma.stockTransfer.findUnique({
-      where: { id: transferId },
-    });
-
-    if (!transfer) {
-      throw new NotFoundException('سند المناقلة غير موجود');
-    }
-
-    if (transfer.targetTenantId !== tenantId) {
-      throw new ForbiddenException('هذه الشحنة ليست موجهة لصيدليتك الحالية');
-    }
-
-    if (transfer.status !== 'PENDING') {
-      throw new BadRequestException(`لا يمكن استلام الشحنة، حالتها الحالية (${transfer.status})`);
-    }
-
-    // 1. Ensure medicine exists in target inventory_items
-    let itemRows: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT id, units_per_pack FROM "${schemaName}".inventory_items
-      WHERE medicine_id = $1::uuid
-      LIMIT 1;
-    `, transfer.medicineId);
-
-    let inventoryItemId: string;
-    let unitsPerPack = 1;
-
-    if (itemRows.length === 0) {
-      // Get medicine default units
-      const med = await this.prisma.medicine.findUnique({
-        where: { id: transfer.medicineId },
+    return this.prisma.$transaction(async (tx) => {
+      const transfer = await tx.stockTransfer.findUnique({
+        where: { id: transferId },
       });
-      unitsPerPack = med?.defaultUnitsPerPack || 1;
 
-      const newIdRows: any[] = await this.prisma.$queryRawUnsafe(`
-        INSERT INTO "${schemaName}".inventory_items (
-          id, medicine_id, units_per_pack, shelf_location, created_at, updated_at
-        ) VALUES (
-          gen_random_uuid(), $1::uuid, $2, $3, NOW(), NOW()
-        ) RETURNING id;
-      `, transfer.medicineId, unitsPerPack, dto.shelfLocation || null);
-
-      inventoryItemId = newIdRows[0].id;
-    } else {
-      inventoryItemId = itemRows[0].id;
-      unitsPerPack = itemRows[0].units_per_pack || 1;
-
-      if (dto.shelfLocation) {
-        await this.prisma.$executeRawUnsafe(`
-          UPDATE "${schemaName}".inventory_items
-          SET shelf_location = $1
-          WHERE id = $2::uuid;
-        `, dto.shelfLocation, inventoryItemId);
+      if (!transfer) {
+        throw new NotFoundException('سند المناقلة غير موجود');
       }
-    }
 
-    // 2. Insert Batch into target inventory_batches
-    const batchNumber = transfer.batchNumber || `TRF-${transfer.transferNumber}`;
-    const expiryStr = transfer.expiryDate ? transfer.expiryDate.toISOString().slice(0, 10) : '2028-12-31';
+      if (transfer.targetTenantId !== tenantId) {
+        throw new ForbiddenException('هذه الشحنة ليست موجهة لصيدليتك الحالية');
+      }
 
-    await this.prisma.$executeRawUnsafe(`
-      INSERT INTO "${schemaName}".inventory_batches (
-        id, inventory_item_id, batch_number, expiry_date,
-        quantity_units_initial, quantity_units_remaining,
-        purchase_price_pack, is_recalled, created_at, updated_at
-      ) VALUES (
-        gen_random_uuid(), $1::uuid, $2, $3::date,
-        $4, $4,
-        $5, FALSE, NOW(), NOW()
-      );
-    `,
-      inventoryItemId,
-      batchNumber,
-      expiryStr,
-      transfer.quantityUnits,
-      Number(transfer.purchasePricePack),
-    );
+      if (transfer.status !== 'PENDING') {
+        throw new BadRequestException(`لا يمكن استلام الشحنة، حالتها الحالية (${transfer.status})`);
+      }
 
-    // 3. Mark transfer as COMPLETED
-    const updatedTransfer = await this.prisma.stockTransfer.update({
-      where: { id: transferId },
-      data: {
-        status: 'COMPLETED',
-        receiverUserName: (ctx as any)?.name || 'مستلم الفرع',
-        completedAt: new Date(),
-      },
+      // 1. Ensure medicine exists in target inventory_items
+      let itemRows: any[] = await tx.$queryRawUnsafe(`
+        SELECT id, units_per_pack, selling_price_pack, selling_price_unit FROM "${schemaName}".inventory_items
+        WHERE medicine_id = $1::uuid
+        LIMIT 1;
+      `, transfer.medicineId);
+
+      let inventoryItemId: string;
+      let unitsPerPack = 1;
+      let targetSellingPricePack = 0;
+      let targetSellingPriceUnit = 0;
+
+      if (itemRows.length === 0) {
+        // Get medicine default units
+        const med = await tx.medicine.findUnique({
+          where: { id: transfer.medicineId },
+        });
+        unitsPerPack = med?.defaultUnitsPerPack || 1;
+        targetSellingPricePack = Number(med?.defaultPurchasePrice || transfer.purchasePricePack || 0) * 1.25;
+        targetSellingPriceUnit = unitsPerPack > 0 ? targetSellingPricePack / unitsPerPack : targetSellingPricePack;
+
+        const newIdRows: any[] = await tx.$queryRawUnsafe(`
+          INSERT INTO "${schemaName}".inventory_items (
+            id, medicine_id, units_per_pack, selling_price_pack, selling_price_unit, shelf_location, created_at, updated_at
+          ) VALUES (
+            gen_random_uuid(), $1::uuid, $2, $3, $4, $5, NOW(), NOW()
+          ) RETURNING id;
+        `, transfer.medicineId, unitsPerPack, targetSellingPricePack, targetSellingPriceUnit, dto.shelfLocation || null);
+
+        inventoryItemId = newIdRows[0].id;
+      } else {
+        inventoryItemId = itemRows[0].id;
+        unitsPerPack = itemRows[0].units_per_pack || 1;
+        targetSellingPricePack = Number(itemRows[0].selling_price_pack || 0);
+        targetSellingPriceUnit = Number(itemRows[0].selling_price_unit || 0);
+
+        if (dto.shelfLocation) {
+          await tx.$executeRawUnsafe(`
+            UPDATE "${schemaName}".inventory_items
+            SET shelf_location = $1, updated_at = NOW()
+            WHERE id = $2::uuid;
+          `, dto.shelfLocation, inventoryItemId);
+        }
+      }
+
+      // 2. Insert Batches into target inventory_batches preserving multi-batch allocations
+      const allocations: Array<{
+        batchId?: string;
+        batchNumber?: string;
+        expiryDate?: string | Date | null;
+        units: number;
+        purchasePricePack?: number;
+      }> = (Array.isArray(transfer.batchAllocations) && (transfer.batchAllocations as any[]).length > 0)
+        ? (transfer.batchAllocations as any[])
+        : [{
+            batchId: undefined,
+            batchNumber: transfer.batchNumber || `TRF-${transfer.transferNumber}`,
+            expiryDate: transfer.expiryDate,
+            units: transfer.quantityUnits,
+            purchasePricePack: Number(transfer.purchasePricePack || 0),
+          }];
+
+      for (const alloc of allocations) {
+        const bNumber = alloc.batchNumber || transfer.batchNumber || `TRF-${transfer.transferNumber}`;
+        const expiryStr = alloc.expiryDate 
+          ? (typeof alloc.expiryDate === 'string' ? alloc.expiryDate.slice(0, 10) : new Date(alloc.expiryDate).toISOString().slice(0, 10))
+          : (transfer.expiryDate ? new Date(transfer.expiryDate).toISOString().slice(0, 10) : '2028-12-31');
+        const bPrice = alloc.purchasePricePack ?? Number(transfer.purchasePricePack || 0);
+
+        await tx.$executeRawUnsafe(`
+          INSERT INTO "${schemaName}".inventory_batches (
+            id, inventory_item_id, batch_number, expiry_date,
+            quantity_units_remaining, purchase_price_pack,
+            selling_price_pack, selling_price_unit,
+            is_recalled, created_at
+          ) VALUES (
+            gen_random_uuid(), $1::uuid, $2, $3::date,
+            $4, $5,
+            $6, $7,
+            FALSE, NOW()
+          );
+        `,
+          inventoryItemId,
+          bNumber,
+          expiryStr,
+          Number(alloc.units),
+          bPrice,
+          targetSellingPricePack,
+          targetSellingPriceUnit,
+        );
+      }
+
+      // 3. Mark transfer as COMPLETED
+      const updatedTransfer = await tx.stockTransfer.update({
+        where: { id: transferId },
+        data: {
+          status: 'COMPLETED',
+          receiverUserName: (ctx as any)?.name || 'مستلم الفرع',
+          completedAt: new Date(),
+        },
+      });
+
+      return {
+        success: true,
+        message: `تم استلام الشحنة (${transfer.quantityPacks} علبة من ${transfer.tradeName}) بنجاح وإضافتها إلى مخزون الرفوف`,
+        transfer: updatedTransfer,
+      };
     });
-
-    return {
-      success: true,
-      message: `تم استلام الشحنة (${transfer.quantityPacks} علبة من ${transfer.tradeName}) بنجاح وإضافتها إلى مخزون الرفوف`,
-      transfer: updatedTransfer,
-    };
   }
 
   /**
-   * Cancel a pending transfer and refund units back to source batch
+   * Cancel a pending transfer and refund units back to source batches atomically
    */
   async cancelStockTransfer(transferId: string) {
     const tenantId = this.tenantContext.getTenantId();
     const schemaName = this.tenantContext.getSchemaName();
 
-    const transfer = await this.prisma.stockTransfer.findUnique({
-      where: { id: transferId },
-    });
+    return this.prisma.$transaction(async (tx) => {
+      const transfer = await tx.stockTransfer.findUnique({
+        where: { id: transferId },
+      });
 
-    if (!transfer) {
-      throw new NotFoundException('سند المناقلة غير موجود');
-    }
-
-    if (transfer.sourceTenantId !== tenantId) {
-      throw new ForbiddenException('فقط الفرع المرسل يمكنه إلغاء سند المناقلة');
-    }
-
-    if (transfer.status !== 'PENDING') {
-      throw new BadRequestException('لا يمكن إلغاء شحنة مكتملة أو ملغاة بالفعل');
-    }
-
-    // Refund units back to source inventory
-    const itemRows: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT id FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1;
-    `, transfer.medicineId);
-
-    if (itemRows.length > 0) {
-      const itemId = itemRows[0].id;
-      // Find or create batch
-      const batchRows: any[] = await this.prisma.$queryRawUnsafe(`
-        SELECT id FROM "${schemaName}".inventory_batches 
-        WHERE inventory_item_id = $1::uuid AND batch_number = $2 
-        LIMIT 1;
-      `, itemId, transfer.batchNumber || 'TRANSFER');
-
-      if (batchRows.length > 0) {
-        await this.prisma.$executeRawUnsafe(`
-          UPDATE "${schemaName}".inventory_batches
-          SET quantity_units_remaining = quantity_units_remaining + $1
-          WHERE id = $2::uuid;
-        `, transfer.quantityUnits, batchRows[0].id);
-      } else {
-        await this.prisma.$executeRawUnsafe(`
-          INSERT INTO "${schemaName}".inventory_batches (
-            id, inventory_item_id, batch_number, expiry_date,
-            quantity_units_initial, quantity_units_remaining, purchase_price_pack, created_at, updated_at
-          ) VALUES (
-            gen_random_uuid(), $1::uuid, $2, COALESCE($3::date, CURRENT_DATE + 365),
-            $4, $4, $5, NOW(), NOW()
-          );
-        `, itemId, transfer.batchNumber || 'CANCELLED-REFUND', transfer.expiryDate, transfer.quantityUnits, transfer.purchasePricePack);
+      if (!transfer) {
+        throw new NotFoundException('سند المناقلة غير موجود');
       }
-    }
 
-    await this.prisma.stockTransfer.update({
-      where: { id: transferId },
-      data: { status: 'CANCELLED' },
+      if (transfer.sourceTenantId !== tenantId) {
+        throw new ForbiddenException('فقط الفرع المرسل يمكنه إلغاء سند المناقلة');
+      }
+
+      if (transfer.status !== 'PENDING') {
+        throw new BadRequestException('لا يمكن إلغاء شحنة مكتملة أو ملغاة بالفعل');
+      }
+
+      // Refund units back to source inventory
+      const itemRows: any[] = await tx.$queryRawUnsafe(`
+        SELECT id, selling_price_pack, selling_price_unit FROM "${schemaName}".inventory_items WHERE medicine_id = $1::uuid LIMIT 1;
+      `, transfer.medicineId);
+
+      if (itemRows.length > 0) {
+        const itemId = itemRows[0].id;
+        const allocations: Array<{
+          batchId?: string;
+          batchNumber?: string;
+          expiryDate?: string | Date | null;
+          units: number;
+          purchasePricePack?: number;
+        }> = (Array.isArray(transfer.batchAllocations) && (transfer.batchAllocations as any[]).length > 0)
+          ? (transfer.batchAllocations as any[])
+          : [{
+              batchId: undefined,
+              batchNumber: transfer.batchNumber || 'TRANSFER',
+              expiryDate: transfer.expiryDate,
+              units: transfer.quantityUnits,
+              purchasePricePack: Number(transfer.purchasePricePack || 0),
+            }];
+
+        for (const alloc of allocations) {
+          let refunded = false;
+
+          // A. If exact source batchId is known, lock and refund directly to it
+          if (alloc.batchId) {
+            const existingBatch: any[] = await tx.$queryRawUnsafe(`
+              SELECT id FROM "${schemaName}".inventory_batches
+              WHERE id = $1::uuid
+              FOR UPDATE;
+            `, alloc.batchId);
+
+            if (existingBatch.length > 0) {
+              await tx.$executeRawUnsafe(`
+                UPDATE "${schemaName}".inventory_batches
+                SET quantity_units_remaining = quantity_units_remaining + $1
+                WHERE id = $2::uuid;
+              `, Number(alloc.units), alloc.batchId);
+              refunded = true;
+            }
+          }
+
+          // B. If not refunded yet, find matching batch by batch_number + item_id
+          if (!refunded && alloc.batchNumber) {
+            const batchRows: any[] = await tx.$queryRawUnsafe(`
+              SELECT id FROM "${schemaName}".inventory_batches 
+              WHERE inventory_item_id = $1::uuid AND batch_number = $2 
+              LIMIT 1
+              FOR UPDATE;
+            `, itemId, alloc.batchNumber);
+
+            if (batchRows.length > 0) {
+              await tx.$executeRawUnsafe(`
+                UPDATE "${schemaName}".inventory_batches
+                SET quantity_units_remaining = quantity_units_remaining + $1
+                WHERE id = $2::uuid;
+              `, Number(alloc.units), batchRows[0].id);
+              refunded = true;
+            }
+          }
+
+          // C. Fallback: recreate batch if missing
+          if (!refunded) {
+            const bNum = alloc.batchNumber || 'CANCELLED-REFUND';
+            const bExpiry = alloc.expiryDate 
+              ? (typeof alloc.expiryDate === 'string' ? alloc.expiryDate.slice(0, 10) : new Date(alloc.expiryDate).toISOString().slice(0, 10))
+              : (transfer.expiryDate ? new Date(transfer.expiryDate).toISOString().slice(0, 10) : null);
+            const bPrice = alloc.purchasePricePack ?? Number(transfer.purchasePricePack || 0);
+
+            await tx.$executeRawUnsafe(`
+              INSERT INTO "${schemaName}".inventory_batches (
+                id, inventory_item_id, batch_number, expiry_date,
+                quantity_units_remaining, purchase_price_pack,
+                selling_price_pack, selling_price_unit,
+                is_recalled, created_at
+              ) VALUES (
+                gen_random_uuid(), $1::uuid, $2, COALESCE($3::date, CURRENT_DATE + 365),
+                $4, $5,
+                $6, $7,
+                FALSE, NOW()
+              );
+            `, itemId, bNum, bExpiry, Number(alloc.units), bPrice, Number(itemRows[0].selling_price_pack || 0), Number(itemRows[0].selling_price_unit || 0));
+          }
+        }
+      }
+
+      await tx.stockTransfer.update({
+        where: { id: transferId },
+        data: { status: 'CANCELLED' },
+      });
+
+      return {
+        success: true,
+        message: 'تم إلغاء سند المناقلة وإعادة الكميات لمخزون الفرع بنجاح',
+      };
     });
-
-    return {
-      success: true,
-      message: 'تم إلغاء سند المناقلة وإعادة الكميات لمخزون الفرع بنجاح',
-    };
   }
 
   /**

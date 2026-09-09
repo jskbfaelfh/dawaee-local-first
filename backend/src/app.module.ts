@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { EventEmitterModule } from '@nestjs/event-emitter';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AdminModule } from './modules/admin/admin.module';
@@ -16,6 +17,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { PurchasesModule } from './modules/purchases/purchases.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
 import { ChainModule } from './modules/chain/chain.module';
+import { StocktakeModule } from './modules/stocktake/stocktake.module';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -34,12 +36,20 @@ import { AppService } from './app.service';
     PurchasesModule,
     ExpensesModule,
     ChainModule,
+    StocktakeModule,
     SearchModule,
     PosModule,
     ReportsModule,
     ProfileModule,
     BackupModule,
     RealtimeModule,
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        ttl: 60000,
+        limit: 120,
+      },
+    ]),
   ],
   controllers: [AppController],
   providers: [
@@ -47,6 +57,10 @@ import { AppService } from './app.service';
     {
       provide: APP_INTERCEPTOR,
       useClass: TenantContextInterceptor,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
     },
   ],
 })

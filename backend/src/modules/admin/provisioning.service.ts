@@ -3,6 +3,7 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { CreateTenantDto } from './dto/create-tenant.dto';
+import { generateSecurePassword, isWeakPassword, sanitizeTenantResponse } from '../../common/utils/security.util';
 
 @Injectable()
 export class ProvisioningService {
@@ -11,7 +12,7 @@ export class ProvisioningService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Provision a new Tenant Pharmacy
+   * Provision a new Tenant Pharmacy with ACID safety and automatic schema rollback
    */
   async provisionPharmacy(dto: CreateTenantDto) {
     const rawSlug = dto.slug || dto.ownerUsername || `pharmacy_${Date.now()}`;
@@ -31,118 +32,167 @@ export class ProvisioningService {
     const safeSlug = slug.replace(/[^a-z0-9_]/g, '_').slice(0, 30);
     const schemaName = `ph_${safeSlug}_${randSuffix}`;
 
-    this.logger.log(`Starting schema provisioning for "${dto.name}" with schema: ${schemaName}`);
+    // 1. Validate & Hash Password for Owner BEFORE doing any DDL
+    const rawOwnerPass = dto.ownerPassword ? dto.ownerPassword.trim() : generateSecurePassword(14, 'Own-');
+    const weakOwner = isWeakPassword(rawOwnerPass);
+    if (weakOwner.isWeak) {
+      throw new BadRequestException(weakOwner.reason || 'كلمة مرور المالك ضعيفة جداً');
+    }
 
-    // 1. Execute DDL to create isolated schema and all tenant tables
-    await this.createTenantSchemaAndTables(schemaName);
-
-    // 2. Hash Password for Owner
     const saltRounds = 10;
-    const passwordHash = await bcrypt.hash(dto.ownerPassword, saltRounds);
+    const passwordHash = await bcrypt.hash(rawOwnerPass, saltRounds);
     const ownerUserId = crypto.randomUUID();
 
     const cleanOwnerUsername = (dto.ownerUsername || 'user').toLowerCase().trim().replace(/\s+/g, '_');
     const cleanOwnerName = (dto.ownerName || 'مدير الصيدلية').trim();
 
-    // 3. Insert Owner user record in the newly created tenant schema
-    await this.prisma.$executeRawUnsafe(
-      `INSERT INTO "${schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
-       VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW())`,
-      ownerUserId,
-      cleanOwnerName,
-      cleanOwnerUsername,
-      passwordHash,
-    );
-
-    // 4. Create Cashier Accounts (Single or Multiple)
-    const cashierAccounts: { username: string; password: string; name: string }[] = [];
+    // 2. Prepare Cashier Accounts (Single or Multiple) and validate passwords
+    const cashierAccounts: { username: string; password: string; name: string; id: string; hash: string }[] = [];
     const count = dto.cashierCount !== undefined ? dto.cashierCount : (dto.createCashier !== false ? 1 : 0);
 
     for (let i = 1; i <= count; i++) {
       const suffix = count === 1 ? '_pos' : `_pos${i}`;
       const cashierUsername = `${cleanOwnerUsername}${suffix}`;
-      const cashierPassword = dto.cashierPassword || '123456';
+
+      let cashierPassword = dto.cashierPassword?.trim();
+      if (!cashierPassword) {
+        cashierPassword = generateSecurePassword(12, 'Pos-');
+      } else {
+        const weakCashier = isWeakPassword(cashierPassword);
+        if (weakCashier.isWeak) {
+          throw new BadRequestException(`كلمة مرور الكاشير غير آمنة: ${weakCashier.reason}`);
+        }
+      }
+
       const cashierHash = await bcrypt.hash(cashierPassword, saltRounds);
       const cashierUserId = crypto.randomUUID();
       const cashierName = count === 1 ? `كاشير - ${dto.name}` : `كاشير ${i} - ${dto.name}`;
 
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
-         VALUES ($1::uuid, $2, $3, $4, 'CASHIER', TRUE, NOW())`,
-        cashierUserId,
-        cashierName,
-        cashierUsername,
-        cashierHash,
-      );
-
       cashierAccounts.push({
+        id: cashierUserId,
         name: cashierName,
         username: cashierUsername,
         password: cashierPassword,
+        hash: cashierHash,
       });
     }
 
-    // 5. Calculate Subscription End Date
+    // 3. Calculate Subscription End Date & License Key
     const months = dto.subscriptionMonths || 12;
     const endsAt = new Date();
     endsAt.setMonth(endsAt.getMonth() + months);
-
-    // 6. Generate License Key
     const licenseKey = `DAWAEE-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${new Date().getFullYear()}`;
 
-    // 7. Handle PharmacyChain if requested
-    let chainId = dto.chainId || null;
-    let chainRole = dto.chainRole || 'BRANCH';
+    this.logger.log(`Starting schema provisioning for "${dto.name}" with schema: ${schemaName}`);
 
-    if (dto.isChain && !chainId) {
-      const newChain = await this.prisma.pharmacyChain.create({
-        data: {
-          name: dto.chainName || `مجموعة ${dto.name}`,
-          ownerName: dto.ownerName,
-          ownerPhone: dto.phone || '',
-        },
+    try {
+      // 4. Execute DDL to create isolated schema and all tenant tables
+      await this.createTenantSchemaAndTables(schemaName);
+
+      // 5. Insert users and create Tenant atomically in Master DB
+      const result = await this.prisma.$transaction(async (tx) => {
+        // Insert Owner user record in the newly created tenant schema
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
+           VALUES ($1::uuid, $2, $3, $4, 'OWNER', TRUE, NOW())`,
+          ownerUserId,
+          cleanOwnerName,
+          cleanOwnerUsername,
+          passwordHash,
+        );
+
+        // Insert Cashier user records
+        for (const c of cashierAccounts) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO "${schemaName}".users (id, name, username, password_hash, role, is_active, created_at)
+             VALUES ($1::uuid, $2, $3, $4, 'CASHIER', TRUE, NOW())`,
+            c.id,
+            c.name,
+            c.username,
+            c.hash,
+          );
+        }
+
+        // Handle PharmacyChain if requested
+        let chainId = dto.chainId || null;
+        let chainRole = dto.chainRole || 'BRANCH';
+
+        if (dto.isChain && !chainId) {
+          const newChain = await tx.pharmacyChain.create({
+            data: {
+              name: dto.chainName || `مجموعة ${dto.name}`,
+              ownerName: dto.ownerName,
+              ownerPhone: dto.phone || '',
+            },
+          });
+          chainId = newChain.id;
+          chainRole = 'HQ';
+        }
+
+        // Register Tenant in Master Database
+        const tenant = await tx.tenant.create({
+          data: {
+            name: dto.name,
+            slug,
+            schemaName,
+            governorate: dto.governorate,
+            district: dto.district,
+            addressDetails: dto.addressDetails,
+            googleMapsUrl: dto.googleMapsUrl,
+            latitude: dto.latitude,
+            longitude: dto.longitude,
+            phone: dto.phone || 'غير محدد',
+            licenseKey,
+            subscriptionStatus: 'ACTIVE',
+            subscriptionEndsAt: endsAt,
+            chainId,
+            chainRole,
+          },
+        });
+
+        return { tenant, chainId, chainRole };
       });
-      chainId = newChain.id;
-      chainRole = 'HQ';
+
+      this.logger.log(`Provisioning completed successfully for tenant ID: ${result.tenant.id}`);
+
+      return {
+        tenant: sanitizeTenantResponse(result.tenant),
+        ownerAccount: {
+          userId: ownerUserId,
+          name: dto.ownerName,
+          username: cleanOwnerUsername,
+          password: rawOwnerPass,
+          role: 'OWNER',
+        },
+        cashierAccounts: cashierAccounts.map(({ id, name, username, password }) => ({
+          userId: id,
+          name,
+          username,
+          password,
+          role: 'CASHIER',
+        })),
+        cashierAccount: cashierAccounts[0]
+          ? {
+              userId: cashierAccounts[0].id,
+              name: cashierAccounts[0].name,
+              username: cashierAccounts[0].username,
+              password: cashierAccounts[0].password,
+              role: 'CASHIER',
+            }
+          : null,
+        chainId: result.chainId,
+        chainRole: result.chainRole,
+      };
+    } catch (err: any) {
+      this.logger.error(`Provisioning failed for "${dto.name}" on schema "${schemaName}". Rolling back schema: ${err.message}`);
+      try {
+        await this.prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE;`);
+        this.logger.log(`Orphaned schema "${schemaName}" successfully dropped and rolled back.`);
+      } catch (dropErr: any) {
+        this.logger.error(`Failed to drop orphaned schema "${schemaName}": ${dropErr.message}`);
+      }
+      throw err;
     }
-
-    // 8. Register Tenant in Master Database
-    const tenant = await this.prisma.tenant.create({
-      data: {
-        name: dto.name,
-        slug,
-        schemaName,
-        governorate: dto.governorate,
-        district: dto.district,
-        addressDetails: dto.addressDetails,
-        googleMapsUrl: dto.googleMapsUrl,
-        latitude: dto.latitude,
-        longitude: dto.longitude,
-        phone: dto.phone || 'غير محدد',
-        licenseKey,
-        subscriptionStatus: 'ACTIVE',
-        subscriptionEndsAt: endsAt,
-        chainId,
-        chainRole,
-      },
-    });
-
-    this.logger.log(`Provisioning completed successfully for tenant ID: ${tenant.id}`);
-
-    return {
-      tenant,
-      ownerAccount: {
-        userId: ownerUserId,
-        name: dto.ownerName,
-        username: dto.ownerUsername,
-        password: dto.ownerPassword,
-        role: 'OWNER',
-      },
-      cashierAccounts,
-      cashierAccount: cashierAccounts[0] || null,
-      chainId,
-      chainRole,
-    };
   }
 
   async provisionTenant(dto: CreateTenantDto) {
@@ -200,8 +250,10 @@ export class ProvisioningService {
         subtotal DECIMAL(12, 2) NOT NULL,
         discount_amount DECIMAL(12, 2) DEFAULT 0,
         total_amount DECIMAL(12, 2) NOT NULL,
+        offline_id VARCHAR(100),
         created_at TIMESTAMP DEFAULT NOW()
       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_sales_offline_id" ON "${schemaName}".sales (offline_id) WHERE offline_id IS NOT NULL`,
       `CREATE INDEX IF NOT EXISTS "idx_${schemaName}_sales_dt" ON "${schemaName}".sales (created_at)`,
       `CREATE TABLE IF NOT EXISTS "${schemaName}".sale_items (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -211,18 +263,44 @@ export class ProvisioningService {
         unit_type VARCHAR(10) NOT NULL,
         quantity INT NOT NULL,
         unit_price DECIMAL(12, 2) NOT NULL,
-        total_price DECIMAL(12, 2) NOT NULL
+        total_price DECIMAL(12, 2) NOT NULL,
+        cost_price_pack DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        cost_price_unit DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_cost DECIMAL(12, 2) NOT NULL DEFAULT 0
       )`,
       `CREATE TABLE IF NOT EXISTS "${schemaName}".returns (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         sale_id UUID REFERENCES "${schemaName}".sales(id),
         inventory_item_id UUID REFERENCES "${schemaName}".inventory_items(id),
+        inventory_batch_id UUID REFERENCES "${schemaName}".inventory_batches(id),
         user_id UUID REFERENCES "${schemaName}".users(id),
-        unit_type VARCHAR(10) NOT NULL,
-        quantity INT NOT NULL,
-        refund_amount DECIMAL(12, 2) NOT NULL,
+        trade_name VARCHAR(255),
+        unit_type VARCHAR(10) NOT NULL DEFAULT 'PACK',
+        quantity INT NOT NULL DEFAULT 1,
+        refund_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        unit_cost DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        total_cost DECIMAL(12, 2) NOT NULL DEFAULT 0,
+        item_condition VARCHAR(50) DEFAULT 'RESALEABLE',
+        payment_method VARCHAR(50) DEFAULT 'CASH',
+        user_name VARCHAR(255),
         reason TEXT,
+        notes TEXT,
         created_at TIMESTAMP DEFAULT NOW()
+      )`,
+      `CREATE TABLE IF NOT EXISTS "${schemaName}".shift_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID,
+        user_name VARCHAR(255),
+        opening_cash NUMERIC DEFAULT 0,
+        expected_cash NUMERIC DEFAULT 0,
+        actual_cash NUMERIC DEFAULT 0,
+        cash_difference NUMERIC DEFAULT 0,
+        total_sales_count INT DEFAULT 0,
+        total_sales_amount NUMERIC DEFAULT 0,
+        notes TEXT,
+        status VARCHAR(50) DEFAULT 'CLOSED',
+        opened_at TIMESTAMP DEFAULT NOW(),
+        closed_at TIMESTAMP DEFAULT NOW()
       )`,
       `CREATE TABLE IF NOT EXISTS "${schemaName}".suppliers (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

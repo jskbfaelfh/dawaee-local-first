@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { AsyncLocalStorage } from 'async_hooks';
+import { validateAndSanitizeSchemaName } from '../utils/security.util';
 
 export interface TenantContextPayload {
   tenantId: string;
@@ -34,7 +35,7 @@ export class TenantContextService {
     if (!ctx) {
       throw new Error('Tenant schema not found for the current request.');
     }
-    return ctx.schemaName;
+    return validateAndSanitizeSchemaName(ctx.schemaName);
   }
 
   getUserRole(): string {

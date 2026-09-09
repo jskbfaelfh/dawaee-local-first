@@ -1,7 +1,5 @@
-import { Controller, Get, Post, Body, UseGuards, Res, StreamableFile, NotFoundException } from "@nestjs/common";
+import { Controller, Get, Post, Body, UseGuards } from "@nestjs/common";
 import { AuthGuard } from "@nestjs/passport";
-import type { Response } from "express";
-import * as fs from "fs";
 import { BackupService } from "./backup.service";
 import { SubscriptionGuard } from "../../common/guards/subscription.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
@@ -16,20 +14,6 @@ export class BackupController {
   @Get("export")
   async exportBackup() {
     return this.backupService.exportPharmacyBackup();
-  }
-
-  @Get("download-local-db")
-  async downloadLocalDb(@Res({ passthrough: true }) res: Response) {
-    const filePath = this.backupService.getLocalDbFilePath();
-    if (!fs.existsSync(filePath)) {
-      throw new NotFoundException("ملف البيانات المحلي غير متوفر");
-    }
-    const file = fs.createReadStream(filePath);
-    res.set({
-      "Content-Type": "application/x-sqlite3",
-      "Content-Disposition": 'attachment; filename="dawaee_local.db"',
-    });
-    return new StreamableFile(file);
   }
 
   @Post("restore")

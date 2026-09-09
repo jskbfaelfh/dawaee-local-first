@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
+import { getOrGenerateDevJwtSecret } from '../../common/utils/security.util';
 
 @Module({
   imports: [
@@ -12,12 +13,15 @@ import { JwtStrategy } from './jwt.strategy';
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        secret: configService.get<string>('JWT_SECRET') || 'dawaee-jwt-dev-secret-key-2026',
-        signOptions: {
-          expiresIn: (configService.get<string>('JWT_EXPIRES_IN') || '7d') as any,
-        },
-      }),
+      useFactory: (configService: ConfigService) => {
+        const secret = configService.get<string>('JWT_SECRET') || getOrGenerateDevJwtSecret();
+        return {
+          secret,
+          signOptions: {
+            expiresIn: (configService.get<string>('JWT_EXPIRES_IN') || '7d') as any,
+          },
+        };
+      },
     }),
   ],
   controllers: [AuthController],

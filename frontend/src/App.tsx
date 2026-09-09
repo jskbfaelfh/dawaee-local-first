@@ -22,11 +22,13 @@ import {
   Pin,
   PinOff,
   Clock,
+  ClipboardCheck,
 } from 'lucide-react';
 import { PosView } from './views/PosView';
 import { BulkStockEntryView } from './views/BulkStockEntryView';
 import { InventoryView } from './views/InventoryView';
 import { ExpiryView } from './views/ExpiryView';
+import { StocktakeView } from './views/StocktakeView';
 import { PurchasesView } from './views/PurchasesView';
 import { ExpensesView } from './views/ExpensesView';
 import { OwnerMobileDashboardView } from './views/OwnerMobileDashboardView';
@@ -54,6 +56,7 @@ type ActiveTab =
   | 'BULK_STOCK'
   | 'INVENTORY'
   | 'EXPIRY'
+  | 'STOCKTAKE'
   | 'PURCHASES'
   | 'EXPENSES'
   | 'CHAIN'
@@ -443,6 +446,13 @@ export const App: React.FC = () => {
                 activeColor="bg-purple-600 text-white shadow-md shadow-purple-900/30"
               />
               <NavItem
+                tab="STOCKTAKE"
+                label="الجرد والتسوية"
+                icon={ClipboardCheck}
+                badge="جديد"
+                activeColor="bg-teal-600 text-white shadow-md shadow-teal-900/30"
+              />
+              <NavItem
                 tab="PURCHASES"
                 label="المشتريات"
                 icon={FileText}
@@ -700,6 +710,7 @@ export const App: React.FC = () => {
           {activeTab === 'BULK_STOCK' && <BulkStockEntryView />}
           {activeTab === 'INVENTORY' && <InventoryView onNavigateToExpiry={() => navigateToTab('EXPIRY')} />}
           {activeTab === 'EXPIRY' && <ExpiryView onNavigateToInventory={() => navigateToTab('INVENTORY')} />}
+          {activeTab === 'STOCKTAKE' && <StocktakeView onNavigateToInventory={() => navigateToTab('INVENTORY')} />}
           {activeTab === 'PURCHASES' && <PurchasesView />}
           {activeTab === 'EXPENSES' && <ExpensesView />}
           {activeTab === 'CHAIN' && (

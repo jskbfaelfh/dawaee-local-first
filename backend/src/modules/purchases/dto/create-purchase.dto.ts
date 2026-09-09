@@ -38,6 +38,17 @@ export class PurchaseItemDto {
   @IsOptional()
   bonusPacks?: number;
 
+  @IsOptional()
+  amortizeBonus?: boolean;
+
+  @IsString()
+  @IsOptional()
+  bonusBatchNumber?: string;
+
+  @IsString()
+  @IsOptional()
+  bonusExpiryDate?: string;
+
   @IsNumber()
   @Min(1)
   unitsPerPack!: number;

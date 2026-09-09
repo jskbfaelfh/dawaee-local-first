@@ -26,6 +26,15 @@ import {
   MessageSquare,
   Copy,
   Check,
+  ShieldCheck,
+  Lock,
+  Wallet,
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  CheckCircle2,
+  ArrowDown,
+  ArrowUp,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { BatchTraceabilityModal } from '../components/BatchTraceabilityModal';
@@ -37,8 +46,10 @@ export const ReportsView: React.FC = () => {
     .toISOString()
     .slice(0, 10);
 
-  // Active Tab: 'shortages' | 'inventory' | 'sold' | 'debts' | 'financial' | 'net_profit' | 'dead_stock' | 'forecast'
-  const [activeTab, setActiveTab] = useState<'shortages' | 'inventory' | 'sold' | 'debts' | 'financial' | 'net_profit' | 'dead_stock' | 'forecast'>('shortages');
+  // Active Tab
+  const [activeTab, setActiveTab] = useState<
+    'shortages' | 'inventory' | 'sold' | 'debts' | 'financial' | 'net_profit' | 'dead_stock' | 'forecast' | 'shifts' | 'returns' | 'kardex'
+  >('shortages');
 
   // Date Range States
   const [periodPreset, setPeriodPreset] = useState<'today' | 'week' | 'month' | 'year' | 'custom'>('month');
@@ -77,6 +88,19 @@ export const ReportsView: React.FC = () => {
   const [soldStocktake, setSoldStocktake] = useState<any[]>([]);
   const [debtsReport, setDebtsReport] = useState<any | null>(null);
 
+  // Shifts Audit Report State
+  const [shiftsAuditReport, setShiftsAuditReport] = useState<any | null>(null);
+
+  // Returns Audit Report State
+  const [returnsAuditReport, setReturnsAuditReport] = useState<any | null>(null);
+
+  // Medicine Kardex State
+  const [kardexReport, setKardexReport] = useState<any | null>(null);
+  const [kardexSearchTerm, setKardexSearchTerm] = useState('');
+  const [kardexSearchResults, setKardexSearchResults] = useState<any[]>([]);
+  const [kardexSearching, setKardexSearching] = useState(false);
+  const [selectedKardexItemId, setSelectedKardexItemId] = useState<string | null>(null);
+
   // Set Preset Date Ranges
   const handleSetPreset = (preset: 'today' | 'week' | 'month' | 'year') => {
     setPeriodPreset(preset);
@@ -95,6 +119,35 @@ export const ReportsView: React.FC = () => {
     } else if (preset === 'year') {
       const firstOfYear = new Date(now.getFullYear(), 0, 1);
       setFrom(firstOfYear.toISOString().slice(0, 10));
+    }
+  };
+
+  // Kardex Search effect
+  useEffect(() => {
+    if (!kardexSearchTerm.trim()) {
+      setKardexSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setKardexSearching(true);
+      try {
+        const res = await apiRequest<any[]>(`/inventory?search=${encodeURIComponent(kardexSearchTerm)}`);
+        setKardexSearchResults(Array.isArray(res) ? res : []);
+      } catch {
+        setKardexSearchResults([]);
+      } finally {
+        setKardexSearching(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [kardexSearchTerm]);
+
+  const fetchKardex = async (itemId: string) => {
+    try {
+      const data = await apiRequest<any>(`/reports/medicine-kardex/${itemId}?from=${from}&to=${to}`);
+      setKardexReport(data);
+    } catch (e) {
+      console.error('Failed to load kardex', e);
     }
   };
 
@@ -143,6 +196,14 @@ export const ReportsView: React.FC = () => {
       } else if (activeTab === 'forecast') {
         const forecast = await apiRequest<any>('/reports/smart-stock-forecast');
         setForecastReport(forecast);
+      } else if (activeTab === 'shifts') {
+        const shifts = await apiRequest<any>(`/reports/shifts-audit?from=${from}&to=${to}`);
+        setShiftsAuditReport(shifts);
+      } else if (activeTab === 'returns') {
+        const returnsData = await apiRequest<any>(`/reports/returns-audit?from=${from}&to=${to}`);
+        setReturnsAuditReport(returnsData);
+      } else if (activeTab === 'kardex' && selectedKardexItemId) {
+        await fetchKardex(selectedKardexItemId);
       }
     } catch (err) {
       console.error(err);
@@ -153,7 +214,7 @@ export const ReportsView: React.FC = () => {
 
   useEffect(() => {
     fetchReports();
-  }, [activeTab, from, to, deadStockDays, shortageSupplierFilter, shortageSeverityFilter]);
+  }, [activeTab, from, to, deadStockDays, shortageSupplierFilter, shortageSeverityFilter, selectedKardexItemId]);
 
   // WhatsApp and Copy Helpers for Supplier Shortages
   const generateWhatsAppMessage = (supplierGroup: any) => {
@@ -250,6 +311,33 @@ export const ReportsView: React.FC = () => {
       item.scientificName?.toLowerCase().includes(tableSearch.toLowerCase()) ||
       item.barcode?.includes(tableSearch) ||
       item.supplierName?.toLowerCase().includes(tableSearch.toLowerCase()),
+  );
+
+  const filteredShifts = (shiftsAuditReport?.shifts || []).filter(
+    (sh: any) =>
+      !tableSearch ||
+      sh.userName?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      sh.notes?.toLowerCase().includes(tableSearch.toLowerCase()),
+  );
+
+  const filteredReturns = (returnsAuditReport?.items || []).filter(
+    (it: any) =>
+      !tableSearch ||
+      it.tradeName?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      it.scientificName?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      it.cashierName?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      it.reason?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      it.notes?.toLowerCase().includes(tableSearch.toLowerCase()),
+  );
+
+  const filteredKardexMovements = (kardexReport?.movements || []).filter(
+    (mv: any) =>
+      !tableSearch ||
+      mv.label?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      mv.docNumber?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      mv.batchNumber?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      mv.cashier?.toLowerCase().includes(tableSearch.toLowerCase()) ||
+      mv.extra?.toLowerCase().includes(tableSearch.toLowerCase()),
   );
 
   return (
@@ -352,6 +440,42 @@ export const ReportsView: React.FC = () => {
           >
             <Brain className="w-4 h-4 text-amber-300 animate-pulse" />
             التنبؤ الذكي
+          </button>
+
+          <button
+            onClick={() => setActiveTab('shifts')}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'shifts'
+                ? 'bg-slate-900 text-white shadow-md'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Lock className="w-4 h-4 text-emerald-400" />
+            <span>تدقيق الورديات</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('returns')}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'returns'
+                ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <RotateCcw className="w-4 h-4 text-amber-500" />
+            <span>المرتجعات والتوالف</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('kardex')}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap cursor-pointer ${
+              activeTab === 'kardex'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Layers className="w-4 h-4 text-indigo-500" />
+            <span>كارت الصنف (حركة مادة)</span>
           </button>
         </div>
 
@@ -1996,6 +2120,976 @@ export const ReportsView: React.FC = () => {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 9. SHIFTS AUDIT TAB */}
+      {activeTab === 'shifts' && (
+        <div className="flex flex-col gap-6">
+          {/* Top Info & Action Bar */}
+          <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <Lock className="w-5 h-5 text-emerald-600" />
+                تدقيق إغلاقات الورديات والكاشيرية
+              </h2>
+              <p className="text-xs text-slate-500 font-bold mt-0.5">
+                متابعة حركة الصندوق، رصيد الافتتاح، المبيعات المسجلة، مطابقات الكاش الفعلي، وكشف أي عجز أو فائض مالي
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const rows = (shiftsAuditReport?.shifts || []).map((sh: any, idx: number) => {
+                    const diff = Number(sh.cashDifference || 0);
+                    const diffLabel = diff === 0 ? 'مطابق' : diff < 0 ? `عجز (${Math.abs(diff)})` : `فائض (+${diff})`;
+                    return [
+                      idx + 1,
+                      sh.userName || 'غير محدد',
+                      sh.openedAt ? new Date(sh.openedAt).toLocaleString('ar-IQ') : '—',
+                      sh.closedAt ? new Date(sh.closedAt).toLocaleString('ar-IQ') : 'مفتوحة',
+                      Number(sh.openingCash || 0),
+                      Number(sh.expectedCash || 0),
+                      Number(sh.actualCash || 0),
+                      diff,
+                      diffLabel,
+                      Number(sh.totalSalesCount || 0),
+                      Number(sh.totalSalesAmount || 0),
+                      sh.notes || '—'
+                    ];
+                  });
+                  exportToCSV(
+                    'تدقيق_الورديات',
+                    rows,
+                    ['#', 'الكاشير', 'وقت الفتح', 'وقت الإغلاق', 'رصيد الافتتاح', 'الكاش المتوقع', 'الكاش الفعلي', 'الفرق الرقمي', 'حالة المطابقة', 'عدد الفواتير', 'إجمالي المبيعات', 'الملاحظات']
+                  );
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer transition-colors"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                تصدير Excel
+              </button>
+            </div>
+          </div>
+
+          {/* 4 Summary KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Total Shifts */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">إجمالي الورديات</span>
+                <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-2xl">
+                  <Layers className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-slate-900">
+                  {shiftsAuditReport?.summary?.totalShifts || 0}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">وردية</span>
+                </div>
+                <div className="text-[11px] font-bold text-slate-400 mt-1">
+                  ضمن الفترة المحددة
+                </div>
+              </div>
+            </div>
+
+            {/* Total Sales Revenue in Shifts */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">إجمالي مبيعات الصناديق</span>
+                <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-2xl">
+                  <TrendingUp className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-emerald-600">
+                  {Number(shiftsAuditReport?.summary?.totalSalesRevenue || 0).toLocaleString()}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">د.ع</span>
+                </div>
+                <div className="text-[11px] font-bold text-slate-400 mt-1">
+                  من فواتير الورديات المكتملة
+                </div>
+              </div>
+            </div>
+
+            {/* Cash Variance (Net Difference) */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">صافي فروقات الصندوق</span>
+                <div className={`p-2.5 rounded-2xl ${
+                  Number(shiftsAuditReport?.summary?.totalCashDifference || 0) < 0
+                    ? 'bg-rose-50 text-rose-600'
+                    : Number(shiftsAuditReport?.summary?.totalCashDifference || 0) > 0
+                    ? 'bg-blue-50 text-blue-600'
+                    : 'bg-emerald-50 text-emerald-600'
+                }`}>
+                  <Wallet className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className={`text-2xl font-black ${
+                  Number(shiftsAuditReport?.summary?.totalCashDifference || 0) < 0
+                    ? 'text-rose-600'
+                    : Number(shiftsAuditReport?.summary?.totalCashDifference || 0) > 0
+                    ? 'text-blue-600'
+                    : 'text-emerald-600'
+                }`}>
+                  {Number(shiftsAuditReport?.summary?.totalCashDifference || 0) > 0 ? '+' : ''}
+                  {Number(shiftsAuditReport?.summary?.totalCashDifference || 0).toLocaleString()}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">د.ع</span>
+                </div>
+                <div className="text-[11px] font-bold mt-1">
+                  {Number(shiftsAuditReport?.summary?.totalCashDifference || 0) < 0 ? (
+                    <span className="text-rose-600 font-black">🔻 عجز كاش إجمالي يستوجب المراجعة</span>
+                  ) : Number(shiftsAuditReport?.summary?.totalCashDifference || 0) > 0 ? (
+                    <span className="text-blue-600 font-black">🔺 فائض كاش غير مسجل</span>
+                  ) : (
+                    <span className="text-emerald-600 font-black">✅ مطابقة تامة 100% بدون فروقات</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Reconciliation Breakdown */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">دقة المطابقة الميدانية</span>
+                <div className="p-2.5 bg-slate-50 text-slate-700 rounded-2xl">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-1">
+                <div className="text-center">
+                  <div className="text-base font-black text-emerald-600">
+                    {shiftsAuditReport?.summary?.balancedShiftsCount || 0}
+                  </div>
+                  <div className="text-[10px] font-bold text-slate-400">مطابقة ✅</div>
+                </div>
+                <div className="w-[1px] h-6 bg-slate-200" />
+                <div className="text-center">
+                  <div className="text-base font-black text-rose-600">
+                    {shiftsAuditReport?.summary?.shortageShiftsCount || 0}
+                  </div>
+                  <div className="text-[10px] font-bold text-slate-400">عجز 🔻</div>
+                </div>
+                <div className="w-[1px] h-6 bg-slate-200" />
+                <div className="text-center">
+                  <div className="text-base font-black text-blue-600">
+                    {shiftsAuditReport?.summary?.surplusShiftsCount || 0}
+                  </div>
+                  <div className="text-[10px] font-bold text-slate-400">فائض 🔺</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Staff Performance Ranking */}
+          {shiftsAuditReport?.staffPerformance && shiftsAuditReport.staffPerformance.length > 0 && (
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-indigo-600" />
+                  <h3 className="text-sm font-black text-slate-800">أداء الكاشيرية وموظفي الصندوق</h3>
+                </div>
+                <span className="text-xs font-bold text-slate-400">
+                  مرتبة حسب حجم المبيعات الإجمالية
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {shiftsAuditReport.staffPerformance.map((st: any, idx: number) => {
+                  const diff = Number(st.totalCashDifference || 0);
+                  return (
+                    <div
+                      key={idx}
+                      className="p-4 rounded-2xl border border-slate-100 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col justify-between"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center font-black text-xs">
+                            {st.userName?.charAt(0) || 'م'}
+                          </div>
+                          <div>
+                            <div className="text-xs font-black text-slate-800">{st.userName}</div>
+                            <div className="text-[10px] font-bold text-slate-400">
+                              {st.shiftsCount} وردية عمل ({st.totalSalesCount} فاتورة)
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-xs font-black text-emerald-600">
+                            {Number(st.totalSalesAmount || 0).toLocaleString()} د.ع
+                          </div>
+                          <div className="text-[10px] font-bold text-slate-400">مبيعات الكاشير</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 pt-2.5 border-t border-slate-200/60 flex items-center justify-between text-[11px] font-bold">
+                        <span className="text-slate-500">فرق الكاش التراكمي:</span>
+                        <span className={`font-black px-2 py-0.5 rounded-lg ${
+                          diff < 0
+                            ? 'bg-rose-100 text-rose-700'
+                            : diff > 0
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-emerald-100 text-emerald-700'
+                        }`}>
+                          {diff > 0 ? '+' : ''}{diff.toLocaleString()} د.ع
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Detailed Shifts Table */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-slate-700" />
+                <h3 className="text-sm font-black text-slate-800">
+                  سجل تفاصيل إغلاقات الورديات ({filteredShifts.length})
+                </h3>
+              </div>
+              <div className="relative w-full sm:w-64">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="بحث باسم الكاشير أو الملاحظة..."
+                  value={tableSearch}
+                  onChange={(e) => setTableSearch(e.target.value)}
+                  className="w-full pr-8 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:outline-hidden focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-bold">
+                    <th className="p-3">#</th>
+                    <th className="p-3">الكاشير (المستخدم)</th>
+                    <th className="p-3">وقت الفتح</th>
+                    <th className="p-3">وقت الإغلاق</th>
+                    <th className="p-3">رصيد الافتتاح</th>
+                    <th className="p-3">المبيعات المسجلة</th>
+                    <th className="p-3">الكاش المتوقع</th>
+                    <th className="p-3">الكاش الفعلي (الجرد)</th>
+                    <th className="p-3">فارق الكاش</th>
+                    <th className="p-3">الحالة والملاحظات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                  {filteredShifts.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="p-8 text-center text-slate-400 font-bold">
+                        لا توجد ورديات مسجلة ضمن المعايير المحددة
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredShifts.map((sh: any, idx: number) => {
+                      const diff = Number(sh.cashDifference || 0);
+                      const isClosed = sh.status === 'CLOSED';
+                      return (
+                        <tr key={sh.id || idx} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="p-3 font-mono text-slate-400">{idx + 1}</td>
+                          <td className="p-3">
+                            <div className="font-black text-slate-900">{sh.userName || 'غير محدد'}</div>
+                          </td>
+                          <td className="p-3 text-slate-500 font-mono text-[11px]">
+                            {sh.openedAt ? new Date(sh.openedAt).toLocaleString('ar-IQ', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </td>
+                          <td className="p-3 text-slate-500 font-mono text-[11px]">
+                            {sh.closedAt ? (
+                              new Date(sh.closedAt).toLocaleString('ar-IQ', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                            ) : (
+                              <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-[10px] font-black border border-emerald-200 animate-pulse">
+                                قيد العمل 🟢
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3 font-mono">
+                            {Number(sh.openingCash || 0).toLocaleString()} د.ع
+                          </td>
+                          <td className="p-3">
+                            <div className="font-mono text-slate-900 font-bold">
+                              {Number(sh.totalSalesAmount || 0).toLocaleString()} د.ع
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-bold">
+                              {sh.totalSalesCount || 0} فاتورة
+                            </div>
+                          </td>
+                          <td className="p-3 font-mono text-slate-600">
+                            {Number(sh.expectedCash || 0).toLocaleString()} د.ع
+                          </td>
+                          <td className="p-3 font-mono font-bold text-slate-900">
+                            {isClosed ? `${Number(sh.actualCash || 0).toLocaleString()} د.ع` : '—'}
+                          </td>
+                          <td className="p-3">
+                            {!isClosed ? (
+                              <span className="text-slate-400 font-bold text-[11px]">لم تُغلق بعد</span>
+                            ) : diff === 0 ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-[11px] font-black">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                مطابق تماماً
+                              </span>
+                            ) : diff < 0 ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-[11px] font-black">
+                                <ArrowDownRight className="w-3 h-3 text-rose-600" />
+                                عجز: {Math.abs(diff).toLocaleString()} د.ع
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-[11px] font-black">
+                                <ArrowUpRight className="w-3 h-3 text-blue-600" />
+                                فائض: +{diff.toLocaleString()} د.ع
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3 text-slate-500 max-w-[200px] truncate" title={sh.notes || ''}>
+                            {sh.notes ? (
+                              <span className="text-[11px] bg-slate-100 px-2 py-0.5 rounded-lg text-slate-700">
+                                {sh.notes}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10. RETURNS & SPOILAGE AUDIT TAB */}
+      {activeTab === 'returns' && (
+        <div className="flex flex-col gap-6">
+          {/* Top Info & Action Bar */}
+          <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <RotateCcw className="w-5 h-5 text-amber-600" />
+                تدقيق المرتجعات والبضاعة التالفة
+              </h2>
+              <p className="text-xs text-slate-500 font-bold mt-0.5">
+                تتبع الأدوية المرجعة، التمييز الدقيق بين البضاعة الصالحة والتالفة، ومراقبة الكاش المسترد وخسائر الهدر
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const rows = (returnsAuditReport?.items || []).map((it: any, idx: number) => [
+                    idx + 1,
+                    it.tradeName,
+                    it.scientificName || '',
+                    it.quantity,
+                    it.unitType === 'PACK' ? 'علبة' : 'شريط',
+                    Number(it.refundAmount || 0),
+                    it.itemCondition === 'DAMAGED' ? 'تالف (خسارة)' : 'صالح للبيع (أُعيد للرف)',
+                    it.paymentMethod === 'CASH' ? 'نقداً (كاش)' : it.paymentMethod === 'ZAIN_CASH' ? 'زين كاش' : 'كي كارد',
+                    it.cashierName || '—',
+                    it.reason || '—',
+                    it.notes || '—',
+                    it.createdAt ? new Date(it.createdAt).toLocaleString('ar-IQ') : '—'
+                  ]);
+                  exportToCSV(
+                    'تدقيق_المرتجعات_والتوالف',
+                    rows,
+                    ['#', 'اسم الدواء', 'الاسم العلمي', 'الكمية', 'الوحدة', 'المبلغ المسترد', 'الحالة', 'طريقة الدفع', 'المسؤول', 'سبب الإرجاع', 'الملاحظات', 'التاريخ']
+                  );
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer transition-colors"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                تصدير Excel
+              </button>
+            </div>
+          </div>
+
+          {/* 4 Summary KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Total Return Operations */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">إجمالي المرتجعات</span>
+                <div className="p-2.5 bg-amber-50 text-amber-600 rounded-2xl">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-slate-900">
+                  {returnsAuditReport?.summary?.totalReturnsCount || 0}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">عملية إرجاع</span>
+                </div>
+                <div className="text-[11px] font-bold text-slate-400 mt-1">
+                  ضمن الفترة المحددة
+                </div>
+              </div>
+            </div>
+
+            {/* Total Refunds Paid */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">إجمالي المبالغ المستردة</span>
+                <div className="p-2.5 bg-rose-50 text-rose-600 rounded-2xl">
+                  <Wallet className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-rose-600">
+                  {Number(returnsAuditReport?.summary?.totalRefundAmount || 0).toLocaleString()}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">د.ع</span>
+                </div>
+                <div className="text-[11px] font-bold text-slate-400 mt-1">
+                  مبالغ رُدت للزبائن
+                </div>
+              </div>
+            </div>
+
+            {/* Resaleable Stock (Back to shelf) */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">أدوية صالحة أُعيدت للرف</span>
+                <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-2xl">
+                  <Package className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-emerald-600">
+                  {returnsAuditReport?.summary?.resaleableCount || 0}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">بند دوائي</span>
+                </div>
+                <div className="text-[11px] font-bold text-emerald-700 mt-1">
+                  بقيمة {Number(returnsAuditReport?.summary?.resaleableRefund || 0).toLocaleString()} د.ع عاودت المخزون
+                </div>
+              </div>
+            </div>
+
+            {/* Damaged Spoilage Loss */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">خسائر التوالف والمعزول</span>
+                <div className="p-2.5 bg-rose-50 text-rose-600 rounded-2xl">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-2xl font-black text-rose-600">
+                  {Number(returnsAuditReport?.summary?.damagedRefund || 0).toLocaleString()}
+                  <span className="text-xs font-bold text-slate-500 mr-1.5">د.ع</span>
+                </div>
+                <div className="text-[11px] font-bold text-rose-700 mt-1">
+                  🔴 {returnsAuditReport?.summary?.damagedCount || 0} صنف تالف/منتهي عُزل نهائياً
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Breakdown Analytics: Payment Methods & Top Reasons */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Payment Methods */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                  <CreditCard className="w-4 h-4 text-indigo-600" />
+                  قنوات رد المبالغ المالية
+                </span>
+                <span className="text-[11px] font-bold text-slate-400">توزيع الكاش والدفع الإلكتروني</span>
+              </div>
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 text-xs font-bold">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                    <span>نقداً من درج الكاشير (CASH)</span>
+                  </div>
+                  <span className="font-mono font-black text-slate-900">
+                    {Number(returnsAuditReport?.paymentMethods?.CASH || 0).toLocaleString()} د.ع
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 text-xs font-bold">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                    <span>محفظة زين كاش (Zain Cash)</span>
+                  </div>
+                  <span className="font-mono font-black text-slate-900">
+                    {Number(returnsAuditReport?.paymentMethods?.ZAIN_CASH || 0).toLocaleString()} د.ع
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 text-xs font-bold">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                    <span>بطاقة كي كارد / ماستركارد (Qi Card)</span>
+                  </div>
+                  <span className="font-mono font-black text-slate-900">
+                    {Number(returnsAuditReport?.paymentMethods?.QI_CARD || 0).toLocaleString()} د.ع
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Top Return Reasons */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-xs flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-amber-600" />
+                  أبرز أسباب الإرجاع المسجلة
+                </span>
+                <span className="text-[11px] font-bold text-slate-400">تحليل جودة الخدمة</span>
+              </div>
+              <div className="space-y-2 max-h-[165px] overflow-y-auto pr-1">
+                {(!returnsAuditReport?.topReasons || returnsAuditReport.topReasons.length === 0) ? (
+                  <div className="p-6 text-center text-slate-400 font-bold text-xs">
+                    لا توجد أسباب إرجاع مسجلة
+                  </div>
+                ) : (
+                  returnsAuditReport.topReasons.map((rsn: any, idx: number) => (
+                    <div key={idx} className="flex items-center justify-between p-2.5 rounded-2xl bg-slate-50 text-xs font-bold">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-lg bg-amber-100 text-amber-800 text-[10px] font-black flex items-center justify-center">
+                          {idx + 1}
+                        </span>
+                        <span className="text-slate-800">{rsn.reason}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="px-2 py-0.5 bg-slate-200/70 text-slate-700 rounded-lg text-[10px] font-black">
+                          {rsn.count} مرة
+                        </span>
+                        <span className="font-mono text-slate-900 font-bold">
+                          {Number(rsn.totalRefund || 0).toLocaleString()} د.ع
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Detailed Returns Table */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4 text-slate-700" />
+                <h3 className="text-sm font-black text-slate-800">
+                  سجل حركة المرتجعات ({filteredReturns.length})
+                </h3>
+              </div>
+              <div className="relative w-full sm:w-64">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="بحث بالدواء، الكاشير، أو السبب..."
+                  value={tableSearch}
+                  onChange={(e) => setTableSearch(e.target.value)}
+                  className="w-full pr-8 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:outline-hidden focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-bold">
+                    <th className="p-3">#</th>
+                    <th className="p-3">اسم الدواء</th>
+                    <th className="p-3">الكمية</th>
+                    <th className="p-3">المبلغ المسترد</th>
+                    <th className="p-3">حالة الدواء ومصيره</th>
+                    <th className="p-3">طريقة الرد</th>
+                    <th className="p-3">المسؤول</th>
+                    <th className="p-3">سبب الإرجاع</th>
+                    <th className="p-3">التاريخ والوقت</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                  {filteredReturns.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="p-8 text-center text-slate-400 font-bold">
+                        لا توجد حركات إرجاع مسجلة ضمن الفترة المحددة
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredReturns.map((it: any, idx: number) => {
+                      const isResaleable = it.itemCondition === 'RESALEABLE';
+                      return (
+                        <tr key={it.id || idx} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="p-3 font-mono text-slate-400">{idx + 1}</td>
+                          <td className="p-3">
+                            <div className="font-black text-slate-900">{it.tradeName}</div>
+                            {it.scientificName && (
+                              <div className="text-[10px] text-slate-400 italic">{it.scientificName}</div>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            <span className="font-mono font-black text-slate-800">
+                              {it.quantity} {it.unitType === 'PACK' ? 'علبة' : 'شريط'}
+                            </span>
+                          </td>
+                          <td className="p-3 font-mono font-black text-rose-600">
+                            {Number(it.refundAmount || 0).toLocaleString()} د.ع
+                          </td>
+                          <td className="p-3">
+                            {isResaleable ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-[11px] font-black">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                سليم (أُعيد للرف) 🟢
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-[11px] font-black">
+                                <AlertTriangle className="w-3 h-3 text-rose-600" />
+                                تالف (عُزل عن البيع) 🔴
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-lg text-[10px] font-bold">
+                              {it.paymentMethod === 'CASH' ? 'كاش (نقداً)' : it.paymentMethod === 'ZAIN_CASH' ? 'زين كاش' : 'كي كارد'}
+                            </span>
+                          </td>
+                          <td className="p-3 text-slate-600 font-bold">
+                            {it.cashierName || '—'}
+                          </td>
+                          <td className="p-3 text-slate-600 max-w-[200px] truncate" title={it.notes ? `${it.reason || ''} - ${it.notes}` : it.reason || ''}>
+                            <div className="text-slate-900 font-bold">{it.reason || 'إرجاع'}</div>
+                            {it.notes && <div className="text-[10px] text-slate-400">{it.notes}</div>}
+                          </td>
+                          <td className="p-3 text-slate-500 font-mono text-[11px]">
+                            {it.createdAt ? new Date(it.createdAt).toLocaleString('ar-IQ', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 11. MEDICINE KARDEX & DETAILED AUDIT TRAIL TAB */}
+      {activeTab === 'kardex' && (
+        <div className="flex flex-col gap-6">
+          {/* Search Medicine Input Banner */}
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs flex flex-col gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-indigo-600" />
+                  كارت الصنف وحركة المادة التفصيلي (Medicine Kardex)
+                </h2>
+                <p className="text-xs text-slate-500 font-bold mt-0.5">
+                  التتبع الزمني الدقيق لكل حركة وارد (شراء) أو صادر (بيع) أو إرجاع، مع احتساب الرصيد التراكمي خطوة بخطوة
+                </p>
+              </div>
+
+              {selectedKardexItemId && kardexReport?.medicine && (
+                <button
+                  onClick={() => {
+                    const rows = (kardexReport?.movements || []).map((mv: any, idx: number) => [
+                      idx + 1,
+                      mv.date ? new Date(mv.date).toLocaleString('ar-IQ') : '—',
+                      mv.type === 'PURCHASE' ? 'شراء' : mv.type === 'SALE' ? 'بيع' : 'إرجاع',
+                      mv.label || '—',
+                      mv.docNumber || '—',
+                      mv.batchNumber || '—',
+                      mv.expiryDate ? new Date(mv.expiryDate).toLocaleDateString('ar-IQ') : '—',
+                      mv.inUnits,
+                      mv.outUnits,
+                      mv.runningBalancePacks,
+                      mv.runningBalanceStrips,
+                      mv.runningBalanceUnits,
+                      mv.price,
+                      mv.cashier || mv.condition || '—',
+                      mv.extra || '—'
+                    ]);
+                    exportToCSV(
+                      `كارت_صنف_${kardexReport.medicine.tradeName}`,
+                      rows,
+                      ['#', 'التاريخ', 'النوع', 'البيان', 'رقم المستند', 'الوجبة', 'الصلاحية', 'الوارد (وحدات)', 'الصادر (وحدات)', 'الرصيد علب', 'الرصيد أشرطة', 'إجمالي الوحدات', 'السعر', 'المسؤول/الحالة', 'تفاصيل']
+                    );
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs cursor-pointer transition-colors self-start sm:self-auto"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  تصدير كارت الصنف Excel
+                </button>
+              )}
+            </div>
+
+            {/* Live Autocomplete Search Input */}
+            <div className="relative">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute right-4 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="ابحث عن دواء بالاسم التجاري أو العلمي أو الباركود لعرض كارت الصنف..."
+                  value={kardexSearchTerm}
+                  onChange={(e) => setKardexSearchTerm(e.target.value)}
+                  className="w-full pr-11 pl-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-bold focus:outline-hidden focus:border-indigo-500 shadow-inner"
+                />
+                {kardexSearching && (
+                  <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin absolute left-4 top-1/2 -translate-y-1/2" />
+                )}
+              </div>
+
+              {/* Autocomplete Dropdown */}
+              {kardexSearchResults.length > 0 && (
+                <div className="absolute top-full mt-2 w-full bg-white rounded-2xl border border-slate-200 shadow-xl z-50 max-h-72 overflow-y-auto divide-y divide-slate-100">
+                  {kardexSearchResults.map((item: any) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedKardexItemId(item.id);
+                        setKardexSearchTerm(item.customName || item.medicine?.tradeName || '');
+                        setKardexSearchResults([]);
+                      }}
+                      className="w-full text-right p-3 hover:bg-indigo-50/70 transition-colors flex items-center justify-between gap-3 cursor-pointer"
+                    >
+                      <div>
+                        <div className="text-xs font-black text-slate-900">
+                          {item.customName || item.medicine?.tradeName}
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          {item.medicine?.scientificName} • {item.medicine?.strength || ''} {item.medicine?.dosageForm || ''}
+                        </div>
+                      </div>
+                      <div className="text-left">
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-700 rounded-lg text-[10px] font-bold">
+                          سعر البيع: {Number(item.sellingPricePack || 0).toLocaleString()} د.ع
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Selected Medicine Info Card */}
+          {kardexReport?.medicine ? (
+            <div className="space-y-6">
+              <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-6 rounded-3xl shadow-md border border-slate-800">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 rounded-lg text-[10px] font-black">
+                        بطاقة صنف مخزنية
+                      </span>
+                      {kardexReport.medicine.dosageForm && (
+                        <span className="text-xs font-bold text-slate-400">
+                          {kardexReport.medicine.dosageForm} {kardexReport.medicine.strength || ''}
+                        </span>
+                      )}
+                    </div>
+                    <h3 className="text-xl font-black mt-1">
+                      {kardexReport.medicine.tradeName}
+                    </h3>
+                    {kardexReport.medicine.scientificName && (
+                      <p className="text-xs text-slate-400 italic mt-0.5">
+                        {kardexReport.medicine.scientificName}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Stock & Price Badges */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="bg-white/10 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-white/10 text-center">
+                      <div className="text-[10px] font-bold text-slate-400">الرصيد الفعلي الحالي</div>
+                      <div className="text-base font-black text-emerald-400 mt-0.5">
+                        {kardexReport.medicine.currentStockPacks} علبة و {kardexReport.medicine.currentStockStrips} شريط
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-400">
+                        (إجمالي {kardexReport.medicine.currentStockUnits} وحدة)
+                      </div>
+                    </div>
+
+                    <div className="bg-white/10 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-white/10 text-center">
+                      <div className="text-[10px] font-bold text-slate-400">سعر البيع المعتمد</div>
+                      <div className="text-base font-black text-white mt-0.5">
+                        {Number(kardexReport.medicine.sellingPricePack || 0).toLocaleString()} د.ع
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        للقطعة/الشريط: {Number(kardexReport.medicine.sellingPriceUnit || 0).toLocaleString()} د.ع
+                      </div>
+                    </div>
+
+                    <div className="bg-white/10 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-white/10 text-center">
+                      <div className="text-[10px] font-bold text-slate-400">محتوى العبوة</div>
+                      <div className="text-base font-black text-indigo-300 mt-0.5">
+                        {kardexReport.medicine.unitsPerPack || 1}
+                      </div>
+                      <div className="text-[10px] text-slate-400">شريط / وحدة بالعلبة</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Active Batches Pills */}
+                {kardexReport.batches && kardexReport.batches.length > 0 && (
+                  <div className="mt-5 pt-4 border-t border-white/10 flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-bold text-slate-400 ml-2">الوجبات الحالية بالرف:</span>
+                    {kardexReport.batches.map((b: any, idx: number) => (
+                      <span
+                        key={idx}
+                        className="px-3 py-1 bg-white/5 border border-white/10 rounded-xl text-xs font-mono font-bold flex items-center gap-2"
+                      >
+                        <span className="text-indigo-300">#{b.batchNumber || 'وجبة'}</span>
+                        <span className="text-slate-400">
+                          نفاذ: {b.expiryDate ? new Date(b.expiryDate).toLocaleDateString('ar-IQ') : '—'}
+                        </span>
+                        <span className="text-emerald-400">({b.remainingUnits} وحدة)</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Movement History Table */}
+              <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+                <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-indigo-600" />
+                    <h3 className="text-sm font-black text-slate-800">
+                      التاريخ الزمني لحركة المادة ({filteredKardexMovements.length} حركة)
+                    </h3>
+                  </div>
+                  <div className="relative w-full sm:w-64">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="فلترة بالسجل أو الوجبة أو الفاتورة..."
+                      value={tableSearch}
+                      onChange={(e) => setTableSearch(e.target.value)}
+                      className="w-full pr-8 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:outline-hidden focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50/75 border-b border-slate-200 text-slate-500 font-bold">
+                        <th className="p-3">التاريخ والوقت</th>
+                        <th className="p-3">نوع الحركة</th>
+                        <th className="p-3">المستند والوجبة</th>
+                        <th className="p-3">وارد (+)</th>
+                        <th className="p-3">صادر (-)</th>
+                        <th className="p-3 bg-indigo-50/50 text-indigo-950 font-black">الرصيد بعد الحركة</th>
+                        <th className="p-3">السعر / التكلفة</th>
+                        <th className="p-3">البيان والتفاصيل</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                      {filteredKardexMovements.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="p-8 text-center text-slate-400 font-bold">
+                            لا توجد حركات مسجلة لهذا الصنف ضمن الفترة المختارة
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredKardexMovements.map((mv: any, idx: number) => {
+                          const isPurchase = mv.type === 'PURCHASE';
+                          const isSale = mv.type === 'SALE';
+
+                          return (
+                            <tr key={mv.id || idx} className="hover:bg-slate-50/80 transition-colors">
+                              <td className="p-3 font-mono text-[11px] text-slate-500">
+                                {mv.date ? new Date(mv.date).toLocaleString('ar-IQ', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                              </td>
+                              <td className="p-3">
+                                {isPurchase ? (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-[11px] font-black">
+                                    <ArrowDown className="w-3 h-3 text-blue-600" />
+                                    📥 شراء وارد
+                                  </span>
+                                ) : isSale ? (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 text-slate-800 border border-slate-200 rounded-xl text-[11px] font-black">
+                                    <ArrowUp className="w-3 h-3 text-slate-600" />
+                                    📤 بيع منصرف
+                                  </span>
+                                ) : (
+                                  <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-black border ${
+                                    mv.condition === 'DAMAGED'
+                                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                      : 'bg-amber-50 text-amber-700 border-amber-200'
+                                  }`}>
+                                    <RotateCcw className="w-3 h-3 text-amber-600" />
+                                    🔄 إرجاع
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                <div className="font-mono text-slate-900 font-bold">
+                                  {mv.docNumber ? `فاتورة: ${mv.docNumber}` : '—'}
+                                </div>
+                                {mv.batchNumber && (
+                                  <div className="text-[10px] text-slate-400 font-mono">
+                                    وجبة: {mv.batchNumber}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {mv.inUnits > 0 ? (
+                                  <span className="font-mono font-black text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-lg">
+                                    +{mv.inUnits} وحدة
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300 font-mono">—</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {mv.outUnits > 0 ? (
+                                  <span className="font-mono font-black text-rose-600 bg-rose-50 px-2 py-0.5 rounded-lg">
+                                    -{mv.outUnits} وحدة
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300 font-mono">—</span>
+                                )}
+                              </td>
+                              <td className="p-3 bg-indigo-50/40">
+                                <div className="font-black text-indigo-950 font-mono text-xs">
+                                  {mv.runningBalancePacks} علبة و {mv.runningBalanceStrips} شريط
+                                </div>
+                                <div className="text-[10px] text-indigo-600/70 font-mono">
+                                  ({mv.runningBalanceUnits} وحدة)
+                                </div>
+                              </td>
+                              <td className="p-3 font-mono text-slate-800">
+                                {Number(mv.price || 0).toLocaleString()} د.ع
+                              </td>
+                              <td className="p-3 text-slate-600">
+                                <div className="text-slate-900 font-bold text-xs">{mv.label}</div>
+                                <div className="text-[10px] text-slate-400">{mv.extra}</div>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-white p-12 rounded-3xl border border-dashed border-slate-300 text-center flex flex-col items-center justify-center gap-3">
+              <div className="p-4 bg-indigo-50 text-indigo-600 rounded-3xl">
+                <Search className="w-8 h-8" />
+              </div>
+              <h3 className="text-base font-black text-slate-800">
+                ابحث عن أي دواء لمعاينة كارت الصنف الكامل
+              </h3>
+              <p className="text-xs text-slate-400 font-bold max-w-md">
+                اختر أي دواء من شريط البحث أعلاه للاطلاع على كارت الصنف التاريخي، وتتبع كل حبة وعلبة دخلت وخرجت من صيدليتك مع الرصيد المتراكم.
+              </p>
+            </div>
+          )}
         </div>
       )}
 

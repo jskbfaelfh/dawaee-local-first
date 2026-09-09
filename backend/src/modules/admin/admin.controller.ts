@@ -141,7 +141,7 @@ export class AdminController {
 
   @Get('settings/master-r2')
   async getMasterR2Config() {
-    return this.r2BackupService.getMasterR2Config();
+    return this.r2BackupService.getMasterR2PublicConfig();
   }
 
   @Post('settings/master-r2')

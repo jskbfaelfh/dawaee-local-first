@@ -85,7 +85,8 @@ async function main() {
   let tenant = await prisma.tenant.findUnique({ where: { slug } });
 
   if (!tenant) {
-    const passwordHash = await bcrypt.hash('123456', 10);
+    const samplePass = 'Dawaee#Sample2026';
+    const passwordHash = await bcrypt.hash(samplePass, 10);
     const ownerUserId = crypto.randomUUID();
 
     await prisma.$executeRawUnsafe(`

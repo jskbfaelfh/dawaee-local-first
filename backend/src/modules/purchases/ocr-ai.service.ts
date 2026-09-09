@@ -304,10 +304,9 @@ export class OcrAiService {
       // 3. Shelf Location: autofill from existing inventory
       const shelfLocation = existingItem?.shelfLocation ? String(existingItem.shelfLocation).trim() : '';
 
-      // 4. Expiry Date: if invoice did not provide an expiry date, fallback to last known batch date
-      if (!expiryDate && existingBatch?.expiryDate) {
-        expiryDate = existingBatch.expiryDate;
-        discrepancies.push(`📅 تم اقتراح الصلاحية من آخر وجبة سابقة: ${expiryDate}`);
+      // 4. Expiry Date: strictly NEVER inherit expiry from previous batches (clinical patient safety)
+      if (!expiryDate) {
+        discrepancies.push('⚠️ الصلاحية غير محددة في الفاتورة - يرجى إدخال تاريخ الصلاحية يدوياً من العبوة لضمان سلامة المرضى');
       }
 
       if (existingItem) {

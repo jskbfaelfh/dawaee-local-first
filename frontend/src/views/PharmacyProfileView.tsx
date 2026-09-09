@@ -102,7 +102,7 @@ export const PharmacyProfileView: React.FC = () => {
           showPhoneNumber: data.pharmacy.showPhoneNumber ?? true,
           showWhatsapp: data.pharmacy.showWhatsapp ?? true,
           is24Hours: data.pharmacy.is24Hours ?? false,
-          geminiApiKey: data.pharmacy.geminiApiKey || '',
+          geminiApiKey: '',
         });
       }
     } catch (err: any) {
@@ -143,32 +143,34 @@ export const PharmacyProfileView: React.FC = () => {
     try {
       const data = await apiRequest<any>('/backup/export');
       const jsonStr = JSON.stringify(data, null, 2);
-      const dateStr = new Date().toISOString().slice(0, 10);
-      const timeStr = new Date().toTimeString().slice(0, 5).replace(':', '-');
-      const fileName = `Dawaee_Backup_${dateStr}_${timeStr}.json`;
+      const filename = `dawaee_backup_${data.pharmacy?.slug || 'pharmacy'}_${new Date().toISOString().slice(0, 10)}.json`;
 
       if (dirHandle) {
-        const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+        // Save using File System Access API
+        const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
         const writable = await fileHandle.createWritable();
         await writable.write(jsonStr);
         await writable.close();
-        setBackupMessage({ type: 'success', text: `تم حفظ النسخة بنجاح في مجلد (${dirHandle.name})` });
       } else {
+        // Fallback: Browser Download
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = fileName;
+        a.download = filename;
+        document.body.appendChild(a);
         a.click();
+        document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        setBackupMessage({ type: 'success', text: 'تم تنزيل النسخة الاحتياطية بنجاح' });
       }
-      const nowStr = new Date().toLocaleString('ar-IQ');
-      setLastBackup(nowStr);
-      localStorage.setItem('dawaee_last_backup', nowStr);
+
+      const backupTime = new Date().toLocaleString('ar-IQ');
+      setLastBackup(backupTime);
+      localStorage.setItem('dawaee_last_backup', backupTime);
+      setBackupMessage({ type: 'success', text: `تم حفظ النسخة الاحتياطية بنجاح (${filename})` });
     } catch (err: any) {
       console.error(err);
-      setBackupMessage({ type: 'error', text: err.message || 'فشل إنشاء النسخة الاحتياطية' });
+      setBackupMessage({ type: 'error', text: err.message || 'فشل حفظ النسخة الاحتياطية' });
     } finally {
       setBackupLoading(false);
     }
@@ -230,12 +232,19 @@ export const PharmacyProfileView: React.FC = () => {
     setMessage(null);
 
     try {
+      const payload: any = { ...pharmacyForm };
+      // If key input is empty and server already has a key saved, omit it to avoid deleting existing key
+      if (!payload.geminiApiKey && profileData?.pharmacy?.hasGeminiApiKey) {
+        delete payload.geminiApiKey;
+      }
+
       const res = await apiRequest<any>('/pharmacy/profile', {
         method: 'PATCH',
-        body: JSON.stringify(pharmacyForm),
+        body: JSON.stringify(payload),
       });
 
       setMessage({ type: 'success', text: res.message || 'تم حفظ بيانات وشعار الصيدلية بنجاح' });
+      setPharmacyForm((prev) => ({ ...prev, geminiApiKey: '' }));
       fetchProfile();
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'فشل حفظ بيانات الصيدلية' });
@@ -361,7 +370,7 @@ export const PharmacyProfileView: React.FC = () => {
         {/* License & Days Remaining Badge */}
         <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 text-right">
           <div className="text-[11px] font-bold text-slate-500">رقم الترخيص</div>
-          <div className="text-xs font-mono font-black text-slate-900">{profileData?.pharmacy?.licenseKey}</div>
+          <div className="text-xs font-mono font-black text-slate-900">{profileData?.pharmacy?.licenseKeyMasked || profileData?.pharmacy?.licenseKey}</div>
           <div className="text-[11px] font-bold text-indigo-700 mt-1">
             متبقي {profileData?.pharmacy?.daysRemaining} يوم
           </div>
@@ -751,8 +760,8 @@ export const PharmacyProfileView: React.FC = () => {
                   </div>
                 </div>
 
-                <div>
-                  {pharmacyForm.geminiApiKey ? (
+                <div className="flex items-center gap-2">
+                  {profileData?.pharmacy?.hasGeminiApiKey || pharmacyForm.geminiApiKey ? (
                     <span className="px-2.5 py-1 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full text-[10px] font-black">
                       🟢 مفعل
                     </span>
@@ -760,6 +769,19 @@ export const PharmacyProfileView: React.FC = () => {
                     <span className="px-2.5 py-1 bg-slate-800 text-slate-400 border border-slate-700 rounded-full text-[10px] font-bold">
                       ⚪ غير مفعل
                     </span>
+                  )}
+                  {profileData?.pharmacy?.hasGeminiApiKey && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm('هل أنت متأكد من رغبتك في إزالة مفتاح Gemini AI؟')) {
+                          setPharmacyForm((prev) => ({ ...prev, geminiApiKey: '__REMOVE__' }));
+                        }
+                      }}
+                      className="px-2 py-0.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 rounded-lg text-[10px] font-bold cursor-pointer transition-colors"
+                    >
+                      إزالة المفتاح
+                    </button>
                   )}
                 </div>
               </div>
@@ -783,10 +805,16 @@ export const PharmacyProfileView: React.FC = () => {
                 <div className="relative">
                   <input
                     type={showApiKey ? 'text' : 'password'}
-                    value={pharmacyForm.geminiApiKey}
+                    value={pharmacyForm.geminiApiKey === '__REMOVE__' ? '' : pharmacyForm.geminiApiKey}
                     onChange={(e) => setPharmacyForm({ ...pharmacyForm, geminiApiKey: e.target.value })}
-                    placeholder="AIzaSyD..."
-                    className="w-full pl-10 pr-3 py-2.5 bg-slate-800/90 border border-slate-700 rounded-xl text-xs font-mono font-bold text-amber-200 placeholder-slate-500 focus:border-indigo-500 focus:outline-hidden"
+                    placeholder={
+                      pharmacyForm.geminiApiKey === '__REMOVE__'
+                        ? 'سيتم حذف المفتاح عند الضغط على "حفظ التعديلات"'
+                        : profileData?.pharmacy?.hasGeminiApiKey
+                        ? `محفوظ بأمان (${profileData?.pharmacy?.geminiApiKeyMasked || '••••••••'}) - اتركه فارغاً للإبقاء عليه`
+                        : 'AIzaSyD...'
+                    }
+                    className="w-full pl-10 pr-3 py-2.5 bg-slate-800/90 border border-slate-700 rounded-xl text-xs font-mono font-bold text-amber-200 placeholder-slate-400 focus:border-indigo-500 focus:outline-hidden"
                   />
                   <button
                     type="button"
@@ -797,6 +825,16 @@ export const PharmacyProfileView: React.FC = () => {
                     {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                {profileData?.pharmacy?.hasGeminiApiKey && !pharmacyForm.geminiApiKey && (
+                  <p className="text-[10px] text-emerald-400 font-medium">
+                    🔒 المفتاح مشفر ومخزن بأمان في السيرفر ({profileData?.pharmacy?.geminiApiKeyMasked}). لتغييره، الصق المفتاح الجديد أعلاه.
+                  </p>
+                )}
+                {pharmacyForm.geminiApiKey === '__REMOVE__' && (
+                  <p className="text-[10px] text-rose-400 font-bold">
+                    ⚠️ تم تحديد المفتاح للإزالة. اضغط "حفظ التعديلات" بالأسفل لتأكيد الحذف.
+                  </p>
+                )}
               </div>
             </div>
 

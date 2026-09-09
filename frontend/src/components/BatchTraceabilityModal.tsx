@@ -158,6 +158,11 @@ export const BatchTraceabilityModal: React.FC<BatchTraceabilityModalProps> = ({
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
                     <h4 className="text-base font-black text-amber-300">{batch.tradeName}</h4>
+                    {batch.isBonus && (
+                      <span className="px-2 py-0.5 bg-amber-400/20 text-amber-300 border border-amber-400/30 rounded-md text-[10px] font-black">
+                        🎁 وجبة بونص (مجانية)
+                      </span>
+                    )}
                     {batch.scientificName && (
                       <span className="text-xs text-slate-300 font-mono">({batch.scientificName})</span>
                     )}
@@ -165,7 +170,7 @@ export const BatchTraceabilityModal: React.FC<BatchTraceabilityModalProps> = ({
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
                     <span>رقم الوجبة: <b className="text-white font-mono">{batch.batchNumber}</b></span>
                     <span>•</span>
-                    <span>سعر الشراء: <b className="text-emerald-300 font-bold">{Number(batch.purchasePricePack).toLocaleString()} د.ع</b></span>
+                    <span>سعر الشراء: <b className="text-emerald-300 font-bold">{batch.isBonus ? '0 د.ع (بونص مجاني)' : `${Number(batch.purchasePricePack).toLocaleString()} د.ع`}</b></span>
                     <span>•</span>
                     <span>سعر البيع: <b className="text-white font-bold">{Number(batch.sellingPricePack).toLocaleString()} د.ع</b></span>
                   </div>

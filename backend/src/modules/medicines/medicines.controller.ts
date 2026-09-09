@@ -6,17 +6,23 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { MedicinesService } from './medicines.service';
 import { CreateMedicineDto, QueryMedicineDto } from './dto/create-medicine.dto';
 
 @Controller('medicines')
-@UseGuards(AuthGuard('jwt'))
+@UseGuards(AuthGuard('jwt'), RolesGuard)
 export class MedicinesController {
   constructor(private readonly medicinesService: MedicinesService) {}
 
   @Get('master-catalog')
+  @Roles('SUPER_ADMIN')
   async getMasterCatalog(
     @Query('search') search?: string,
     @Query('filter') filter?: 'ALL' | 'VERIFIED' | 'UNVERIFIED',
@@ -27,6 +33,7 @@ export class MedicinesController {
   }
 
   @Get('unverified')
+  @Roles('SUPER_ADMIN')
   async getUnverified(@Query('search') search?: string) {
     return this.medicinesService.getUnverified(search);
   }
@@ -42,11 +49,18 @@ export class MedicinesController {
   }
 
   @Post()
-  async create(@Body() dto: CreateMedicineDto) {
-    return this.medicinesService.create(dto);
+  @Roles('SUPER_ADMIN', 'OWNER')
+  async create(
+    @Body() dto: CreateMedicineDto,
+    @CurrentUser() user: any,
+  ) {
+    const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+    return this.medicinesService.create(dto, isSuperAdmin);
   }
 
   @Post(':id/verify')
+  @Roles('SUPER_ADMIN')
+  @HttpCode(HttpStatus.OK)
   async verifyMedicine(
     @Param('id') id: string,
     @Body() body?: Partial<CreateMedicineDto>,
@@ -55,11 +69,15 @@ export class MedicinesController {
   }
 
   @Post('delete-medicine/:id')
+  @Roles('SUPER_ADMIN')
+  @HttpCode(HttpStatus.OK)
   async deleteMedicine(@Param('id') id: string) {
     return this.medicinesService.deleteMedicine(id);
   }
 
   @Post(':id/update')
+  @Roles('SUPER_ADMIN')
+  @HttpCode(HttpStatus.OK)
   async updateMasterMedicine(
     @Param('id') id: string,
     @Body() dto: Partial<CreateMedicineDto>,
@@ -68,6 +86,7 @@ export class MedicinesController {
   }
 
   @Post('ai-smart-search')
+  @HttpCode(HttpStatus.OK)
   async aiSmartSearch(
     @Body() body: { query: string; inStockOnly?: boolean },
     @Param() _params: any,
@@ -79,6 +98,8 @@ export class MedicinesController {
   }
 
   @Post('seed')
+  @Roles('SUPER_ADMIN')
+  @HttpCode(HttpStatus.OK)
   async seed() {
     return this.medicinesService.seedInitialMedicines();
   }

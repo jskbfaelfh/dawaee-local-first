@@ -17,13 +17,13 @@ interface LoginViewProps {
 
 export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onNavigateToSearch }) => {
   const [activeTab, setActiveTab] = useState<'PHARMACY' | 'ADMIN'>('PHARMACY');
-  const [pharmacySlug, setPharmacySlug] = useState('pharmacy_baghdad_1');
-  const [username, setUsername] = useState('owner_ali');
-  const [password, setPassword] = useState('123456');
+  const [pharmacySlug, setPharmacySlug] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
 
   // Admin login credentials
-  const [adminUsername, setAdminUsername] = useState('superadmin');
-  const [adminPassword, setAdminPassword] = useState('Admin@Dawaee2026');
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

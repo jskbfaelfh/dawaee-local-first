@@ -9,6 +9,7 @@ import {
   IsBoolean,
   IsArray,
   ValidateNested,
+  Matches,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -19,6 +20,7 @@ export class CreateTenantDto {
 
   @IsString()
   @IsOptional()
+  @Matches(/^[a-z0-9-_]+$/, { message: 'المعرف اللطيف (slug) يجب أن يحتوي فقط على أحرف إنجليزية وأرقام وشخطات' })
   slug?: string;
 
   @IsString()
@@ -63,7 +65,7 @@ export class CreateTenantDto {
   ownerUsername: string;
 
   @IsString()
-  @MinLength(6, { message: 'كلمة مرور صاحب الصيدلية يجب أن لا تقل عن 6 أحرف' })
+  @MinLength(8, { message: 'كلمة مرور صاحب الصيدلية يجب أن لا تقل عن 8 أحرف وأرقام' })
   ownerPassword: string;
 
   // Auto Create Cashier Account
@@ -86,6 +88,7 @@ export class CreateTenantDto {
 
   @IsString()
   @IsOptional()
+  @MinLength(8, { message: 'كلمة مرور الكاشير يجب أن لا تقل عن 8 أحرف وأرقام' })
   cashierPassword?: string;
 
   // Multi-Branch Chain Options
@@ -113,6 +116,7 @@ export class AddBranchDto {
 
   @IsString()
   @IsOptional()
+  @Matches(/^[a-z0-9-_]+$/, { message: 'المعرف اللطيف (slug) يجب أن يحتوي فقط على أحرف إنجليزية وأرقام وشخطات' })
   slug?: string;
 
   @IsString()
@@ -154,6 +158,7 @@ export class AddBranchDto {
 
   @IsString()
   @IsOptional()
+  @MinLength(8, { message: 'كلمة مرور الكاشير يجب أن لا تقل عن 8 أحرف وأرقام' })
   cashierPassword?: string;
 }
 
@@ -174,6 +179,7 @@ export class BulkBranchItemDto {
 
   @IsString()
   @IsOptional()
+  @Matches(/^[a-z0-9-_]+$/, { message: 'المعرف اللطيف (slug) يجب أن يحتوي فقط على أحرف إنجليزية وأرقام وشخطات' })
   slug?: string;
 
   @IsBoolean()
@@ -207,6 +213,7 @@ export class BulkBranchItemDto {
 
   @IsString()
   @IsOptional()
+  @MinLength(8, { message: 'كلمة مرور الكاشير يجب أن لا تقل عن 8 أحرف وأرقام' })
   cashierPassword?: string;
 }
 
@@ -228,7 +235,7 @@ export class BulkChainOnboardingDto {
   ownerUsername: string;
 
   @IsString()
-  @MinLength(6, { message: 'كلمة مرور المالك يجب أن لا تقل عن 6 أحرف' })
+  @MinLength(8, { message: 'كلمة مرور المالك يجب أن لا تقل عن 8 أحرف وأرقام' })
   ownerPassword: string;
 
   @IsArray()
@@ -299,6 +306,6 @@ export class UpdateStatusDto {
 
 export class ResetPasswordDto {
   @IsString()
-  @MinLength(6, { message: 'كلمة المرور الجديدة يجب أن لا تقل عن 6 أحرف' })
+  @MinLength(8, { message: 'كلمة المرور الجديدة يجب أن لا تقل عن 8 أحرف وأرقام' })
   newPassword: string;
 }

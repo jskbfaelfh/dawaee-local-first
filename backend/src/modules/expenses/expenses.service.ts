@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../database/prisma.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
+import { validateAndSanitizeSchemaName } from '../../common/utils/security.util';
 
 @Injectable()
 export class ExpensesService {
@@ -10,8 +11,9 @@ export class ExpensesService {
    * Helper to ensure expenses table exists in tenant schema
    */
   private async ensureTablesExist(schemaName: string) {
+    const validSchema = validateAndSanitizeSchemaName(schemaName);
     await this.prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "${schemaName}"."expenses" (
+      CREATE TABLE IF NOT EXISTS "${validSchema}"."expenses" (
         "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         "category" VARCHAR(50) NOT NULL DEFAULT 'OTHER',
         "title" VARCHAR(255) NOT NULL,
@@ -33,7 +35,7 @@ export class ExpensesService {
       throw new BadRequestException('الصيدلية غير متوفرة');
     }
 
-    const schema = tenant.schemaName;
+    const schema = validateAndSanitizeSchemaName(tenant.schemaName);
     await this.ensureTablesExist(schema);
 
     const category = dto.category || 'OTHER';
@@ -64,29 +66,33 @@ export class ExpensesService {
   }
 
   /**
-   * Get list of expenses with optional category and date filters
+   * Get list of expenses with parameterized category and date filters (No SQL Injection)
    */
   async getExpenses(tenantId: string, category?: string, startDate?: string, endDate?: string) {
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant || !tenant.schemaName) return { expenses: [], totalExpenses: 0, byCategory: {} };
 
-    const schema = tenant.schemaName;
+    const schema = validateAndSanitizeSchemaName(tenant.schemaName);
     await this.ensureTablesExist(schema);
 
-    let whereClauses: string[] = [];
+    const whereClauses: string[] = [];
+    const params: any[] = [];
 
     if (category && category !== 'ALL') {
-      whereClauses.push(`category = '${category}'`);
+      params.push(category);
+      whereClauses.push(`category = $${params.length}`);
     }
 
     if (startDate) {
       const cleanStart = startDate.includes(' ') ? startDate : `${startDate} 00:00:00`;
-      whereClauses.push(`expense_date >= '${cleanStart}'::timestamp`);
+      params.push(cleanStart);
+      whereClauses.push(`expense_date >= $${params.length}::timestamp`);
     }
 
     if (endDate) {
       const cleanEnd = endDate.includes(' ') ? endDate : `${endDate} 23:59:59`;
-      whereClauses.push(`expense_date <= '${cleanEnd}'::timestamp`);
+      params.push(cleanEnd);
+      whereClauses.push(`expense_date <= $${params.length}::timestamp`);
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
@@ -104,20 +110,20 @@ export class ExpensesService {
       FROM "${schema}"."expenses"
       ${whereStr}
       ORDER BY expense_date DESC, created_at DESC;
-    `);
+    `, ...params);
 
-    // Category aggregations
+    // Category aggregations with the exact same parameterized filters
     const totalsByCategory = await this.prisma.$queryRawUnsafe<Array<{ category: string; total: string }>>(`
       SELECT category, SUM(amount)::text as total
       FROM "${schema}"."expenses"
       ${whereStr}
       GROUP BY category;
-    `);
+    `, ...params);
 
     const byCategory: Record<string, number> = {};
     let totalExpenses = 0;
 
-    for (const row of totalsByCategory) {
+    for (const row of (totalsByCategory || [])) {
       const val = Number(row.total || 0);
       byCategory[row.category] = val;
       totalExpenses += val;
@@ -137,11 +143,11 @@ export class ExpensesService {
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant || !tenant.schemaName) throw new NotFoundException('الصيدلية غير متوفرة');
 
-    const schema = tenant.schemaName;
+    const schema = validateAndSanitizeSchemaName(tenant.schemaName);
     await this.ensureTablesExist(schema);
 
     await this.prisma.$executeRawUnsafe(`
-      DELETE FROM "${schema}"."expenses" WHERE id = $1;
+      DELETE FROM "${schema}"."expenses" WHERE id = $1::uuid;
     `, id);
 
     return { message: 'تم حذف المصروف بنجاح' };

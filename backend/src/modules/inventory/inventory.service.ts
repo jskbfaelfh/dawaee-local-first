@@ -90,6 +90,7 @@ export class InventoryService {
           payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
           payment_method VARCHAR(50) DEFAULT 'CASH',
           receipt_number VARCHAR(100),
+          receipt_image TEXT,
           notes TEXT,
           created_at TIMESTAMP DEFAULT NOW()
         );
@@ -137,12 +138,15 @@ export class InventoryService {
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_recalled BOOLEAN DEFAULT FALSE;
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS selling_price_pack DECIMAL(12, 2);
         ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS selling_price_unit DECIMAL(12, 2);
+        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_bonus BOOLEAN DEFAULT FALSE;
+        ALTER TABLE "${schemaName}".purchase_items ADD COLUMN IF NOT EXISTS amortize_bonus BOOLEAN DEFAULT TRUE;
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS address TEXT;
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS company_name VARCHAR(255);
         ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS balance_due DECIMAL(12, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12, 2) DEFAULT 0;
         ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS net_paid_amount DECIMAL(12, 2) DEFAULT 0;
+        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS receipt_image TEXT;
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255);
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_days INT;
         ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_percent DECIMAL(5, 2);
@@ -357,6 +361,7 @@ END $$;`;
         payment_date as "paymentDate",
         payment_method as "paymentMethod",
         receipt_number as "receiptNumber",
+        receipt_image as "receiptImage",
         notes,
         created_at as "createdAt"
       FROM "${schemaName}".supplier_payments
@@ -432,8 +437,8 @@ END $$;`;
 
     await this.prisma.$executeRawUnsafe(
       `INSERT INTO "${schemaName}".supplier_payments
-       (id, supplier_id, amount, discount_percent, discount_amount, net_paid_amount, payment_date, payment_method, receipt_number, notes, created_at)
-       VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, NOW())`,
+       (id, supplier_id, amount, discount_percent, discount_amount, net_paid_amount, payment_date, payment_method, receipt_number, notes, receipt_image, created_at)
+       VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, NOW())`,
       paymentId,
       supplierId,
       payAmount,
@@ -444,6 +449,7 @@ END $$;`;
       dto.paymentMethod || 'CASH',
       dto.receiptNumber || null,
       finalNotes || null,
+      dto.receiptImage || null,
     );
 
     // 3. Deduct payment from unpaid purchases using FIFO
@@ -658,7 +664,7 @@ END $$;`;
       // 1.2 Financial & Bonus calculations
       const qtyPacks = Number(item.quantityPacks || 1);
       const bonusPacks = Number(item.bonusPacks || 0);
-      const totalPacksReceived = qtyPacks + bonusPacks;
+      const amortizeBonus = item.amortizeBonus !== false;
       const discountPercent = Number(item.discountPercent || 0);
       const purchasePricePack = Number(item.purchasePricePack || 0);
 
@@ -671,7 +677,12 @@ END $$;`;
         ? (lineNetBeforeDirect / subtotalBeforeDirectDiscount) * directDiscountAmount
         : 0;
       const finalLineNet = Math.max(0, lineNetBeforeDirect - lineShareOfDirect);
-      const effectiveNetCostPerPack = totalPacksReceived > 0 ? finalLineNet / totalPacksReceived : purchasePricePack;
+
+      // If amortizeBonus is TRUE (default): cost is diluted across both purchased and bonus packs
+      // If amortizeBonus is FALSE: purchased batch keeps undiluted net cost, bonus batch cost = 0!
+      const effectiveNetCostPerPack = (amortizeBonus && bonusPacks > 0)
+        ? (qtyPacks + bonusPacks > 0 ? finalLineNet / (qtyPacks + bonusPacks) : purchasePricePack)
+        : (qtyPacks > 0 ? finalLineNet / qtyPacks : purchasePricePack);
 
       // 1.3 Format Expiry Date: YYYY-MM-01
       const expiryDateStr = `${item.expiryYear}-${String(item.expiryMonth).padStart(2, '0')}-01`;
@@ -740,25 +751,74 @@ END $$;`;
         );
       }
 
-      // 1.5 Insert Batch Record into Tenant Schema (Includes Quantity + Bonus!)
-      const totalUnits = totalPacksReceived * resolvedUnits;
-      const batchId = crypto.randomUUID();
+      // 1.5 Insert Batch Record(s) into Tenant Schema
+      if (!amortizeBonus && bonusPacks > 0) {
+        // Case A: Separate Batches (وجبة الشراء الأساسية + وجبة دواء بونص منفصلة بسعر 0 د.ع)
+        // 1.5.1 Purchased Batch
+        const purchasedUnits = qtyPacks * resolvedUnits;
+        const purchasedBatchId = crypto.randomUUID();
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".inventory_batches
+           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
+          purchasedBatchId,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          item.batchNumber || null,
+          Math.round(effectiveNetCostPerPack),
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          purchasedUnits,
+          expiryDateStr,
+        );
 
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}".inventory_batches
-         (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, created_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, NOW())`,
-        batchId,
-        inventoryItemId,
-        finalSupplierId,
-        purchaseId,
-        item.batchNumber || null,
-        Math.round(effectiveNetCostPerPack),
-        resolvedSellingPack,
-        resolvedSellingUnit,
-        totalUnits,
-        expiryDateStr,
-      );
+        // 1.5.2 Bonus Batch (وجبة دواء بونص منفصلة بسعر شراء 0 د.ع)
+        const bonusUnits = bonusPacks * resolvedUnits;
+        const bonusBatchId = crypto.randomUUID();
+        const bonusBatchNumber = (item.bonusBatchNumber && item.bonusBatchNumber.trim().length > 0)
+          ? item.bonusBatchNumber.trim()
+          : (item.batchNumber ? `${item.batchNumber}-BONUS` : 'BN-BONUS');
+        const bonusExpiryDateStr = (item.bonusExpiryYear && item.bonusExpiryMonth)
+          ? `${item.bonusExpiryYear}-${String(item.bonusExpiryMonth).padStart(2, '0')}-01`
+          : expiryDateStr;
+
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".inventory_batches
+           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, 0, $6, $7, $8, $9::date, FALSE, TRUE, NOW())`,
+          bonusBatchId,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          bonusBatchNumber,
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          bonusUnits,
+          bonusExpiryDateStr,
+        );
+      } else {
+        // Case B: Amortized / Dissolved (تذويب البونص في السعر - وجبة واحدة جامعة)
+        const totalPacksReceived = qtyPacks + bonusPacks;
+        const totalUnits = totalPacksReceived * resolvedUnits;
+        const batchId = crypto.randomUUID();
+
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".inventory_batches
+           (id, inventory_item_id, supplier_id, purchase_id, batch_number, purchase_price_pack, selling_price_pack, selling_price_unit, quantity_units_remaining, expiry_date, is_recalled, is_bonus, created_at)
+           VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10::date, FALSE, FALSE, NOW())`,
+          batchId,
+          inventoryItemId,
+          finalSupplierId,
+          purchaseId,
+          item.batchNumber || null,
+          Math.round(effectiveNetCostPerPack),
+          resolvedSellingPack,
+          resolvedSellingUnit,
+          totalUnits,
+          expiryDateStr,
+        );
+      }
 
       purchaseItemsToInsert.push({
         id: crypto.randomUUID(),
@@ -766,12 +826,13 @@ END $$;`;
         inventoryItemId,
         quantityPacks: qtyPacks,
         bonusPacks,
+        amortizeBonus,
         unitsPerPack: item.unitsPerPack,
         purchasePricePack,
         discountPercent,
-        netCostPack: effectiveNetCostPerPack,
-        sellingPricePack: item.sellingPricePack,
-        sellingPriceUnit: item.sellingPriceUnit,
+        netCostPack: Math.round(effectiveNetCostPerPack),
+        sellingPricePack: resolvedSellingPack,
+        sellingPriceUnit: resolvedSellingUnit,
         expiryDate: expiryDateStr,
         batchNumber: item.batchNumber || null,
       });
@@ -814,13 +875,14 @@ END $$;`;
     for (const pi of purchaseItemsToInsert) {
       await this.prisma.$executeRawUnsafe(
         `INSERT INTO "${schemaName}".purchase_items
-         (id, purchase_id, inventory_item_id, quantity_packs, bonus_packs, units_per_pack, purchase_price_pack, discount_percent, net_cost_pack, selling_price_pack, selling_price_unit, expiry_date, batch_number)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12::date, $13)`,
+         (id, purchase_id, inventory_item_id, quantity_packs, bonus_packs, amortize_bonus, units_per_pack, purchase_price_pack, discount_percent, net_cost_pack, selling_price_pack, selling_price_unit, expiry_date, batch_number)
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::date, $14)`,
         pi.id,
         pi.purchaseId,
         pi.inventoryItemId,
         pi.quantityPacks,
         pi.bonusPacks,
+        pi.amortizeBonus,
         pi.unitsPerPack,
         pi.purchasePricePack,
         pi.discountPercent,
@@ -1152,6 +1214,7 @@ END $$;`;
         b.expiry_date as "expiryDate",
         (b.expiry_date < CURRENT_DATE) as "isExpired",
         b.is_recalled as "isRecalled",
+        COALESCE(b.is_bonus, FALSE) as "isBonus",
         b.supplier_id as "supplierId",
         b.purchase_id as "purchaseId",
         s.name as "supplierName",
@@ -1186,6 +1249,7 @@ END $$;`;
         b.quantity_units_remaining as "quantityUnitsRemaining",
         b.expiry_date as "expiryDate",
         b.is_recalled as "isRecalled",
+        COALESCE(b.is_bonus, FALSE) as "isBonus",
         b.created_at as "receivedAt",
         m.trade_name as "tradeName",
         m.scientific_name as "scientificName",
@@ -1519,6 +1583,7 @@ END $$;`;
         TO_CHAR(b.expiry_date, 'MM/YYYY') as "expiryFormatted",
         (b.expiry_date - CURRENT_DATE)::int as "daysUntilExpiry",
         b.is_recalled as "isRecalled",
+        COALESCE(b.is_bonus, FALSE) as "isBonus",
         i.id as "inventoryItemId",
         i.units_per_pack as "unitsPerPack",
         i.shelf_location as "shelfLocation",

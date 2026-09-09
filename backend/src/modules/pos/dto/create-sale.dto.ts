@@ -6,6 +6,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -17,11 +18,11 @@ export enum UnitTypeEnum {
 }
 
 export class CartItemDto {
-  @IsString()
+  @IsUUID('all', { message: 'معرف المادة في المخزن يجب أن يكون UUID صالحاً' })
   @IsNotEmpty({ message: 'معرف المادة في المخزن مطلوب' })
   inventoryItemId: string;
 
-  @IsString()
+  @IsUUID('all', { message: 'معرف تشغيلة الوجبة يجب أن يكون UUID صالحاً' })
   @IsOptional()
   inventoryBatchId?: string;
 
@@ -43,16 +44,29 @@ export class CheckoutDto {
   @IsOptional()
   @Min(0)
   discountAmount?: number = 0; // خصم مبلغ مباشر (IQD)
+
+  @IsString()
+  @IsOptional()
+  offlineId?: string; // معرف البيعة المحلي للأوفلاين لمنع تكرار الإرسال والخصم
+}
+
+export enum ItemConditionEnum {
+  RESALEABLE = 'RESALEABLE',
+  DAMAGED = 'DAMAGED',
 }
 
 export class CreateReturnDto {
-  @IsString()
+  @IsUUID('all', { message: 'معرف الفاتورة الأصلية يجب أن يكون UUID صالحاً' })
   @IsOptional()
   saleId?: string; // رابط الفاتورة الأصلية (اختياري)
 
-  @IsString()
+  @IsUUID('all', { message: 'معرف المادة مطلوب ويجب أن يكون UUID صالحاً' })
   @IsNotEmpty({ message: 'معرف المادة مطلوب' })
   inventoryItemId: string;
+
+  @IsUUID('all', { message: 'معرف وجبة التشغيلة يجب أن يكون UUID صالحاً' })
+  @IsOptional()
+  inventoryBatchId?: string;
 
   @IsEnum(UnitTypeEnum)
   unitType: UnitTypeEnum;
@@ -69,6 +83,18 @@ export class CreateReturnDto {
   @IsString()
   @IsOptional()
   reason?: string;
+
+  @IsEnum(ItemConditionEnum)
+  @IsOptional()
+  itemCondition?: ItemConditionEnum = ItemConditionEnum.RESALEABLE;
+
+  @IsString()
+  @IsOptional()
+  paymentMethod?: string = 'CASH';
+
+  @IsString()
+  @IsOptional()
+  notes?: string;
 }
 
 export class OfflineSaleItemDto {

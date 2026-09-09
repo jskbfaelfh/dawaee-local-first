@@ -38,6 +38,11 @@ interface TableRowItem {
   unitsPerPack: number;
   quantityPacks: number;
   bonusPacks: number;
+  amortizeBonus?: boolean;
+  bonusBatchNumber?: string;
+  bonusExpiryMonth?: number;
+  bonusExpiryYear?: number;
+  showBonusConfig?: boolean;
   discountPercent: number;
   purchasePricePack: number;
   lastPurchasePricePack?: number;
@@ -94,6 +99,7 @@ export const BulkStockEntryView: React.FC = () => {
     unitsPerPack: 2,
     quantityPacks: 10,
     bonusPacks: 0,
+    amortizeBonus: true,
     discountPercent: 0,
     purchasePricePack: 0,
     sellingPricePack: 0,
@@ -178,6 +184,8 @@ export const BulkStockEntryView: React.FC = () => {
       unitsPerPack: defaultUnits,
       quantityPacks: 10,
       bonusPacks,
+      amortizeBonus: true,
+      showBonusConfig: false,
       discountPercent: 0,
       purchasePricePack,
       lastPurchasePricePack: lastPurchasePrice,
@@ -228,6 +236,16 @@ export const BulkStockEntryView: React.FC = () => {
 
   const removeRow = (tempId: string) => {
     setItems((prev) => prev.filter((i) => i.tempId !== tempId));
+  };
+
+  // Toggle amortization across all items with bonus
+  const setAllBonusAmortized = (amortized: boolean) => {
+    setItems((prev) =>
+      prev.map((item) => ({
+        ...item,
+        amortizeBonus: amortized,
+      })),
+    );
   };
 
   // Fast Enter Key navigation helper
@@ -291,6 +309,8 @@ export const BulkStockEntryView: React.FC = () => {
       unitsPerPack: Number(newMedForm.unitsPerPack || 1),
       quantityPacks: Number(newMedForm.quantityPacks || 1),
       bonusPacks: Number(newMedForm.bonusPacks || 0),
+      amortizeBonus: newMedForm.amortizeBonus !== false,
+      showBonusConfig: false,
       discountPercent: Number(newMedForm.discountPercent || 0),
       purchasePricePack: Number(newMedForm.purchasePricePack || 0),
       sellingPricePack: Number(newMedForm.sellingPricePack || 0),
@@ -316,6 +336,7 @@ export const BulkStockEntryView: React.FC = () => {
       unitsPerPack: 2,
       quantityPacks: 10,
       bonusPacks: 0,
+      amortizeBonus: true,
       discountPercent: 0,
       purchasePricePack: 0,
       sellingPricePack: 0,
@@ -389,6 +410,10 @@ export const BulkStockEntryView: React.FC = () => {
           unitsPerPack: Number(i.unitsPerPack),
           quantityPacks: Number(i.quantityPacks),
           bonusPacks: Number(i.bonusPacks || 0),
+          amortizeBonus: i.amortizeBonus !== false,
+          bonusBatchNumber: i.bonusBatchNumber?.trim() || undefined,
+          bonusExpiryMonth: i.bonusExpiryMonth ? Number(i.bonusExpiryMonth) : undefined,
+          bonusExpiryYear: i.bonusExpiryYear ? Number(i.bonusExpiryYear) : undefined,
           discountPercent: Number(i.discountPercent || 0),
           purchasePricePack: Number(i.purchasePricePack),
           sellingPricePack: Number(i.sellingPricePack),
@@ -790,11 +815,35 @@ export const BulkStockEntryView: React.FC = () => {
 
       {/* 4. Main Interactive Grid Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="p-3.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
-          <h2 className="font-bold text-slate-800 text-sm flex items-center gap-2">
-            <Layers className="w-4 h-4 text-slate-600" />
-            أدوية الوجبة ({items.length})
-          </h2>
+        <div className="p-3.5 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+              <Layers className="w-4 h-4 text-slate-600" />
+              أدوية الوجبة ({items.length})
+            </h2>
+
+            {items.some((i) => Number(i.bonusPacks || 0) > 0) && (
+              <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-xl text-[11px] font-bold">
+                <span className="text-amber-900">تطبيق البونص:</span>
+                <button
+                  type="button"
+                  onClick={() => setAllBonusAmortized(true)}
+                  className="px-2 py-0.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-md text-[10px] cursor-pointer shadow-2xs font-black transition-colors"
+                  title="تذويب البونص على سعر الشراء لكل أدوية الفاتورة"
+                >
+                  💧 تذويب الكل
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAllBonusAmortized(false)}
+                  className="px-2 py-0.5 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-300 rounded-md text-[10px] cursor-pointer shadow-2xs font-black transition-colors"
+                  title="فصل البونص كوجبات مجانية منفصلة (كلفة 0) لكل أدوية الفاتورة"
+                >
+                  🎁 وجبات منفصلة للكل
+                </button>
+              </div>
+            )}
+          </div>
           <span className="text-xs text-slate-400 font-bold">
             (Enter للتنقل)
           </span>
@@ -848,7 +897,10 @@ export const BulkStockEntryView: React.FC = () => {
 
                   const grossLine = qtyPacks * listPrice;
                   const netLine = grossLine * (1 - discount / 100);
-                  const effectiveCostPerPack = totalPacks > 0 ? Math.round(netLine / totalPacks) : listPrice;
+                  const isAmortized = row.amortizeBonus !== false;
+                  const effectiveCostPerPack = isAmortized
+                    ? (totalPacks > 0 ? Math.round(netLine / totalPacks) : listPrice)
+                    : (qtyPacks > 0 ? Math.round(netLine / qtyPacks) : listPrice);
 
                   return (
                     <tr key={row.tempId} className="hover:bg-slate-50/70 transition-colors">
@@ -904,6 +956,65 @@ export const BulkStockEntryView: React.FC = () => {
                           onKeyDown={(e) => handleKeyDown(e, `input-units-${idx}`)}
                           className="w-full px-2 py-1.5 bg-amber-50 border border-amber-300 rounded-md font-black text-amber-900 text-center"
                         />
+                        {bonusPacks > 0 && (
+                          <div className="flex flex-col gap-1 mt-1">
+                            <button
+                              type="button"
+                              onClick={() => updateRowField(row.tempId, 'amortizeBonus', !isAmortized)}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 shadow-2xs ${
+                                isAmortized
+                                  ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'
+                              }`}
+                              title={
+                                isAmortized
+                                  ? 'تذويب: تخفيض كلفة الشراء للباكيت وتوزيع البونص. انقر للفصل كوجبة بونص منفصلة'
+                                  : 'وجبة منفصلة: يدخل البونص كتشغيلة مجانية برصيد منفصل (كلفة 0). انقر للتحويل إلى تذويب'
+                              }
+                            >
+                              {isAmortized ? '💧 تذويب السعر' : '🎁 وجبة منفصلة'}
+                            </button>
+
+                            {!isAmortized && (
+                              <button
+                                type="button"
+                                onClick={() => updateRowField(row.tempId, 'showBonusConfig', !row.showBonusConfig)}
+                                className="text-[9px] text-slate-500 hover:text-indigo-600 underline font-medium text-center cursor-pointer"
+                              >
+                                {row.showBonusConfig ? 'إخفاء الإعدادات' : '⚙️ تخصيص الوجبة'}
+                              </button>
+                            )}
+
+                            {!isAmortized && row.showBonusConfig && (
+                              <div className="mt-1 p-2 bg-white rounded-lg border border-amber-300 shadow-md text-[10px] space-y-1 text-right">
+                                <div className="font-bold text-amber-900 border-b border-amber-100 pb-0.5">
+                                  وجبة البونص ({bonusPacks} علب):
+                                </div>
+                                <div>
+                                  <label className="text-slate-600 block text-[9px]">رقم التشغيلة:</label>
+                                  <input
+                                    type="text"
+                                    value={row.bonusBatchNumber ?? (row.batchNumber ? `${row.batchNumber}-BONUS` : 'BN-BONUS')}
+                                    onChange={(e) => updateRowField(row.tempId, 'bonusBatchNumber', e.target.value)}
+                                    className="w-full px-1.5 py-0.5 bg-slate-50 border border-slate-200 rounded text-[10px] font-mono"
+                                    placeholder="تشغيلة البونص"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-slate-600 block text-[9px]">الصلاحية:</label>
+                                  <SmartExpiryInput
+                                    month={row.bonusExpiryMonth || row.expiryMonth}
+                                    year={row.bonusExpiryYear || row.expiryYear}
+                                    onChange={(m, y) => {
+                                      updateRowField(row.tempId, 'bonusExpiryMonth', m);
+                                      updateRowField(row.tempId, 'bonusExpiryYear', y);
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       {/* Units Per Pack */}
@@ -965,13 +1076,26 @@ export const BulkStockEntryView: React.FC = () => {
 
                       {/* Calculated Effective Net Cost per Pack */}
                       <td className="p-2.5 bg-indigo-50/40 font-black text-indigo-950 text-xs">
-                        {effectiveCostPerPack.toLocaleString()} د.ع
-                        {bonusPacks > 0 || discount > 0 ? (
-                          <div className="text-[9px] text-emerald-700 font-bold flex items-center gap-0.5">
-                            <ArrowDownLeft className="w-2.5 h-2.5" />
-                            توفير بونص/خصم
+                        <div>{effectiveCostPerPack.toLocaleString()} د.ع</div>
+                        {bonusPacks > 0 && (
+                          <div className="mt-1">
+                            {isAmortized ? (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[9px] font-bold">
+                                💧 كلفة مذوبة ({totalPacks} علبة)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[9px] font-bold">
+                                📦 شراء ({qtyPacks}) + 🎁 مجاني ({bonusPacks})
+                              </span>
+                            )}
                           </div>
-                        ) : null}
+                        )}
+                        {discount > 0 && (
+                          <div className="text-[9px] text-rose-600 font-bold flex items-center gap-0.5 mt-0.5">
+                            <ArrowDownLeft className="w-2.5 h-2.5" />
+                            خصم {discount}%
+                          </div>
+                        )}
                       </td>
 
                       {/* Selling Price Pack */}
@@ -1208,6 +1332,23 @@ export const BulkStockEntryView: React.FC = () => {
                   />
                 </div>
               </div>
+
+              {Number(newMedForm.bonusPacks || 0) > 0 && (
+                <div className="p-2.5 bg-amber-50 rounded-xl border border-amber-200 flex items-center justify-between text-xs">
+                  <span className="font-bold text-amber-900">طريقة احتساب البونص ({newMedForm.bonusPacks} علب):</span>
+                  <button
+                    type="button"
+                    onClick={() => setNewMedForm({ ...newMedForm, amortizeBonus: !newMedForm.amortizeBonus })}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                      newMedForm.amortizeBonus
+                        ? 'bg-blue-50 text-blue-700 border-blue-200'
+                        : 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                    }`}
+                  >
+                    {newMedForm.amortizeBonus ? '💧 تذويب السعر' : '🎁 وجبة منفصلة'}
+                  </button>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>

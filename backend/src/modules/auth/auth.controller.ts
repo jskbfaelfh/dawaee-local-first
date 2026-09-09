@@ -1,23 +1,61 @@
-import { Body, Controller, Post, HttpCode, HttpStatus, Get, UseGuards } from '@nestjs/common';
+import { Body, Controller, Post, HttpCode, HttpStatus, Get, UseGuards, Res } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto, AdminLoginDto } from './dto/login.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: (process.env.NODE_ENV === 'production' ? 'none' : 'lax') as 'none' | 'lax',
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  path: '/',
+};
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() loginDto: LoginDto) {
-    return this.authService.login(loginDto);
+  async login(
+    @Body() loginDto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.login(loginDto);
+    if (result?.accessToken) {
+      res.cookie('dawaee_token', result.accessToken, COOKIE_OPTIONS);
+    }
+    return result;
   }
 
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('admin/login')
   @HttpCode(HttpStatus.OK)
-  async adminLogin(@Body() adminLoginDto: AdminLoginDto) {
-    return this.authService.adminLogin(adminLoginDto);
+  async adminLogin(
+    @Body() adminLoginDto: AdminLoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.adminLogin(adminLoginDto);
+    if (result?.accessToken) {
+      res.cookie('dawaee_token', result.accessToken, COOKIE_OPTIONS);
+    }
+    return result;
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  async logout(@Res({ passthrough: true }) res: Response) {
+    res.clearCookie('dawaee_token', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: (process.env.NODE_ENV === 'production' ? 'none' : 'lax') as 'none' | 'lax',
+      path: '/',
+    });
+    return { success: true, message: 'تم تسجيل الخروج بنجاح' };
   }
 
   @Get('me')
@@ -32,7 +70,12 @@ export class AuthController {
   async switchBranch(
     @CurrentUser() user: any,
     @Body() body: { targetTenantId: string },
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.authService.switchBranch(body.targetTenantId, user.tenantId, user.role);
+    const result = await this.authService.switchBranch(body.targetTenantId, user.tenantId, user.role);
+    if (result?.accessToken) {
+      res.cookie('dawaee_token', result.accessToken, COOKIE_OPTIONS);
+    }
+    return result;
   }
 }
