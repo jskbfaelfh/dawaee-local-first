@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
@@ -14,15 +15,6 @@ async function bootstrap() {
   validateStartupSecurity();
 
   const app = await NestFactory.create(AppModule, { bodyParser: false });
-
-  // Run automated multi-tenant database migrations on bootstrap
-  try {
-    const tenantMigrationService = app.get(TenantMigrationService);
-    logger.log('Checking and synchronizing tenant database schemas...');
-    await tenantMigrationService.migrateAllTenants();
-  } catch (migErr: any) {
-    logger.error(`Tenant migration bootstrap error: ${migErr.message}`);
-  }
 
   // Parse cookies for secure HttpOnly session tokens
   app.use(cookieParser());
@@ -102,5 +94,17 @@ async function bootstrap() {
   const port = process.env.PORT || 4000;
   await app.listen(port, '0.0.0.0');
   logger.log(`🚀 Dawaee Backend API is running on port ${port}`);
+
+  // Run automated multi-tenant database migrations asynchronously without delaying port binding
+  (async () => {
+    try {
+      const tenantMigrationService = app.get(TenantMigrationService);
+      logger.log('Checking and synchronizing tenant database schemas in background...');
+      await tenantMigrationService.migrateAllTenants();
+      logger.log('✅ Tenant database schemas synchronized successfully.');
+    } catch (migErr: any) {
+      logger.error(`Tenant migration error: ${migErr.message}`);
+    }
+  })();
 }
 bootstrap();
