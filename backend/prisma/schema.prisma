@@ -219,7 +219,7 @@ model InventoryItem {
   saleItems SaleItem[]
   returns   Return[]
 
-  @@index([medicineId])
+  @@unique([medicineId])
   @@map("inventory_items")
 }
 

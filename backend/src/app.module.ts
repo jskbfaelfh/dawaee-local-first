@@ -19,6 +19,7 @@ import { ExpensesModule } from './modules/expenses/expenses.module';
 import { ChainModule } from './modules/chain/chain.module';
 import { StocktakeModule } from './modules/stocktake/stocktake.module';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
+import { SubscriptionGuard } from './common/guards/subscription.guard';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
@@ -61,6 +62,10 @@ import { AppService } from './app.service';
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: SubscriptionGuard,
     },
   ],
 })

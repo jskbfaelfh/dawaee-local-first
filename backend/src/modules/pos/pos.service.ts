@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -284,54 +285,65 @@ export class PosService {
                     });
                   }
                 }
-              }
 
-              // Standard FEFO for remaining units or when no offline batch allocations specified
-              if (unitsLeftToDeduct > 0) {
-                for (const batch of availableBatches) {
-                  if (unitsLeftToDeduct <= 0) break;
-                  const batchRemaining = Number(batch.quantity_units_remaining);
-                  if (batchRemaining <= 0) continue;
-
-                  const deductionFromThisBatch = Math.min(unitsLeftToDeduct, batchRemaining);
-
-                  await tx.$executeRawUnsafe(
-                    `UPDATE "${schemaName}".inventory_batches 
-                     SET quantity_units_remaining = quantity_units_remaining - $1 
-                     WHERE id = $2::uuid`,
-                    deductionFromThisBatch,
-                    batch.id,
+                // Strict Pharmaceutical Traceability: If offline-allocated batches are depleted/modified on cloud, fail immediately
+                if (unitsLeftToDeduct > 0) {
+                  const itemName = invItem.custom_name || invItem.trade_name || 'الدواء';
+                  const allocSummary = explicitAllocations
+                    .map((a) => a.batchNumber || a.batchId || 'وجبة غير محددة')
+                    .join('، ');
+                  throw new BadRequestException(
+                    `تعارض في مطابقة الوجبات الفيزيائية للمزامنة غير المتصلة لدواء (${itemName}): الوجبة المحددة (${allocSummary}) لم تعد تحتوي على الكمية المطلوبة على السيرفر (${unitsLeftToDeduct} وحدة ناقصة)، وتم منع الخصم التلقائي من وجبات أخرى حفاظاً على دقة التتبع الدوائي.`,
                   );
+                }
+              } else {
+                // Standard FEFO for online checkout when no offline batch allocations specified
+                if (unitsLeftToDeduct > 0) {
+                  for (const batch of availableBatches) {
+                    if (unitsLeftToDeduct <= 0) break;
+                    const batchRemaining = Number(batch.quantity_units_remaining);
+                    if (batchRemaining <= 0) continue;
 
-                  batch.quantity_units_remaining = batchRemaining - deductionFromThisBatch;
-                  unitsLeftToDeduct -= deductionFromThisBatch;
+                    const deductionFromThisBatch = Math.min(unitsLeftToDeduct, batchRemaining);
 
-                  const batchPackPrice = batch.selling_price_pack != null ? Number(batch.selling_price_pack) : defaultPackPrice;
-                  const batchUnitPrice = batch.selling_price_unit != null ? Number(batch.selling_price_unit) : defaultUnitPrice;
+                    await tx.$executeRawUnsafe(
+                      `UPDATE "${schemaName}".inventory_batches 
+                       SET quantity_units_remaining = quantity_units_remaining - $1 
+                       WHERE id = $2::uuid`,
+                      deductionFromThisBatch,
+                      batch.id,
+                    );
 
-                  const allocatedQty = isPack ? Math.round((deductionFromThisBatch / unitsPerPack) * 100) / 100 : deductionFromThisBatch;
-                  const priceApplied = isPack ? batchPackPrice : batchUnitPrice;
-                  const lineTotal = priceApplied * allocatedQty;
+                    batch.quantity_units_remaining = batchRemaining - deductionFromThisBatch;
+                    unitsLeftToDeduct -= deductionFromThisBatch;
 
-                  const costPricePack = Number(batch.purchase_price_pack) || 0;
-                  const costPriceUnit = unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack;
-                  const lineCost = isPack ? costPricePack * allocatedQty : costPriceUnit * allocatedQty;
+                    const batchPackPrice = batch.selling_price_pack != null ? Number(batch.selling_price_pack) : defaultPackPrice;
+                    const batchUnitPrice = batch.selling_price_unit != null ? Number(batch.selling_price_unit) : defaultUnitPrice;
 
-                  subtotal += lineTotal;
+                    const allocatedQty = isPack ? Math.round((deductionFromThisBatch / unitsPerPack) * 100) / 100 : deductionFromThisBatch;
+                    const priceApplied = isPack ? batchPackPrice : batchUnitPrice;
+                    const lineTotal = priceApplied * allocatedQty;
 
-                  lineItemsToInsert.push({
-                    id: crypto.randomUUID(),
-                    saleId,
-                    inventoryItemId: item.inventoryItemId,
-                    inventoryBatchId: batch.id,
-                    unitType: item.unitType,
-                    quantity: allocatedQty,
-                    unitPrice: priceApplied,
-                    totalPrice: lineTotal,
-                    costPricePack,
-                    costPriceUnit,
-                    totalCost: lineCost,
-                  });
+                    const costPricePack = Number(batch.purchase_price_pack) || 0;
+                    const costPriceUnit = unitsPerPack > 0 ? costPricePack / unitsPerPack : costPricePack;
+                    const lineCost = isPack ? costPricePack * allocatedQty : costPriceUnit * allocatedQty;
+
+                    subtotal += lineTotal;
+
+                    lineItemsToInsert.push({
+                      id: crypto.randomUUID(),
+                      saleId,
+                      inventoryItemId: item.inventoryItemId,
+                      inventoryBatchId: batch.id,
+                      unitType: item.unitType,
+                      quantity: allocatedQty,
+                      unitPrice: priceApplied,
+                      totalPrice: lineTotal,
+                      costPricePack,
+                      costPriceUnit,
+                      totalCost: lineCost,
+                    });
+                  }
                 }
               }
 
@@ -532,15 +544,17 @@ export class PosService {
 
     await this.ensureReturnColumnsExist(schemaName);
 
-    // Get Cashier Name
+    // Get Cashier Name and Role
     let cashierName = 'الكاشير';
+    let userRole = ctx?.role;
     if (userId) {
       const uRows: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT name FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
+        `SELECT name, role FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
         userId,
       );
-      if (uRows.length > 0 && uRows[0].name) {
-        cashierName = uRows[0].name;
+      if (uRows.length > 0) {
+        if (uRows[0].name) cashierName = uRows[0].name;
+        if (uRows[0].role) userRole = uRows[0].role;
       }
     }
 
@@ -811,6 +825,20 @@ export class PosService {
           }
         }
 
+        // High-Value Blind Return Policy: Requiring OWNER Authorization if > 50,000 IQD
+        const HIGH_VALUE_BLIND_RETURN_THRESHOLD = 50000;
+        const prospectiveRefund = dto.refundAmount !== undefined && dto.refundAmount !== null
+          ? Number(dto.refundAmount)
+          : calculatedRefundTotal;
+
+        if (!dto.saleId && (prospectiveRefund > HIGH_VALUE_BLIND_RETURN_THRESHOLD || calculatedRefundTotal > HIGH_VALUE_BLIND_RETURN_THRESHOLD)) {
+          if (userRole !== 'OWNER' && userRole !== 'SUPER_ADMIN') {
+            throw new ForbiddenException(
+              `عمليات الاسترجاع اليدوي بدون فاتورة للمبالغ التي تتجاوز ${HIGH_VALUE_BLIND_RETURN_THRESHOLD.toLocaleString()} د.ع تتطلب موافقة وإشراف المالك (OWNER). المبلغ: ${prospectiveRefund.toLocaleString()} د.ع.`,
+            );
+          }
+        }
+
         // Validate Refund Amount
         let refundAmount = calculatedRefundTotal;
         if (dto.refundAmount !== undefined && dto.refundAmount !== null) {
@@ -824,6 +852,13 @@ export class PosService {
             );
           }
           refundAmount = requestedRefund;
+        }
+
+        // Structured Audit Logging for Blind Returns (Without Sale ID)
+        if (!dto.saleId) {
+          this.logger.warn(
+            `[AUDIT - QUICK RETURN WITHOUT SALE] User: "${cashierName}" (${userId || 'N/A'}, Role: ${userRole || 'UNKNOWN'}), Item: "${invItem.tradeName}" (${dto.inventoryItemId}), Quantity: ${dto.quantity} (${dto.unitType}), Refund: ${refundAmount} IQD, Reason: "${dto.reason.trim()}"`,
+          );
         }
 
         // Sort batch IDs deterministically

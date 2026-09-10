@@ -6,6 +6,7 @@ import { LoginDto, AdminLoginDto } from './dto/login.dto';
 import { SwitchBranchDto } from '../chain/dto/chain.dto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Public } from '../../common/decorators/public.decorator';
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -19,6 +20,7 @@ const COOKIE_OPTIONS = {
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
@@ -33,6 +35,7 @@ export class AuthController {
     return result;
   }
 
+  @Public()
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('admin/login')
   @HttpCode(HttpStatus.OK)
@@ -47,6 +50,7 @@ export class AuthController {
     return result;
   }
 
+  @Public()
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   async logout(@Res({ passthrough: true }) res: Response) {

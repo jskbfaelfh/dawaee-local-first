@@ -56,8 +56,9 @@ export class OfflineBatchAllocationDto {
   units: number;
 
   @IsNumber()
+  @IsOptional()
   @Min(0)
-  unitPrice: number;
+  unitPrice?: number;
 
   @IsNumber()
   @IsOptional()

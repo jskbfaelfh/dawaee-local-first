@@ -152,6 +152,7 @@ BEGIN
   ALTER TABLE "${schemaName}".inventory_batches ALTER COLUMN expiry_date DROP NOT NULL;
   ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_bonus BOOLEAN DEFAULT FALSE;
   CREATE SEQUENCE IF NOT EXISTS "${schemaName}".purchase_invoice_seq START 1;
+  CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_inv_med_unique" ON "${schemaName}".inventory_items (medicine_id);
 END $$;`;
 
       await this.prisma.$executeRawUnsafe(sqlBlock);
