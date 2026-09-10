@@ -152,6 +152,16 @@ export class OcrAiService {
       throw new BadRequestException('يرجى التقاط أو رفع صورة واضحة لفاتورة المذخر.');
     }
 
+    // Maximum Decoded Image Size: 10 MB
+    const MAX_DECODED_BYTES = 10 * 1024 * 1024;
+    const rawBase64 = imageBase64.includes('base64,') ? imageBase64.split('base64,')[1].trim() : imageBase64.trim();
+    const estimatedBytes = Math.ceil((rawBase64.length * 3) / 4);
+    if (estimatedBytes > MAX_DECODED_BYTES * 1.05) {
+      throw new BadRequestException(
+        `حجم صورة الفاتورة بعد فك الترميز (${(estimatedBytes / (1024 * 1024)).toFixed(2)} ميغابايت) يتجاوز الحد الأقصى المسموح به للذكاء الاصطناعي (10 ميغابايت).`,
+      );
+    }
+
     // 2. Call Google Gemini Vision AI directly
     let aiParsedData: any;
     try {

@@ -31,159 +31,12 @@ export class InventoryService {
   ) {}
 
   /**
-   * Helper to ensure suppliers & purchases tables & custom_name column exist in the tenant schema
-   * Runs only ONCE per schema to eliminate massive DDL round-trip latency on subsequent calls.
+   * Helper to ensure suppliers & purchases tables exist in the tenant schema.
+   * Tables and sequences are managed deterministically by TenantMigrationService.
    */
-  private async ensurePurchaseTablesExist(schemaName: string) {
-    if (InventoryService.verifiedSchemas.has(schemaName)) {
-      return;
-    }
-
-    try {
-      const ddl = `
-        CREATE SEQUENCE IF NOT EXISTS "${schemaName}".purchase_invoice_seq START 1;
-        CREATE TABLE IF NOT EXISTS "${schemaName}".suppliers (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          name VARCHAR(255) NOT NULL,
-          phone VARCHAR(50),
-          address TEXT,
-          company_name VARCHAR(255),
-          balance_due DECIMAL(12, 2) DEFAULT 0,
-          notes TEXT,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS "${schemaName}".purchases (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          invoice_number VARCHAR(100),
-          supplier_id UUID,
-          supplier_name VARCHAR(255),
-          total_gross_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          total_discount_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          net_total_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          paid_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          remaining_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          payment_status VARCHAR(20) NOT NULL DEFAULT 'PAID',
-          due_date DATE,
-          notes TEXT,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_purchases_dt" ON "${schemaName}".purchases (created_at);
-        CREATE TABLE IF NOT EXISTS "${schemaName}".purchase_items (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          purchase_id UUID,
-          inventory_item_id UUID,
-          quantity_packs INT NOT NULL,
-          bonus_packs INT NOT NULL DEFAULT 0,
-          units_per_pack INT NOT NULL DEFAULT 1,
-          purchase_price_pack DECIMAL(12, 2) NOT NULL,
-          discount_percent DECIMAL(5, 2) NOT NULL DEFAULT 0,
-          net_cost_pack DECIMAL(12, 2) NOT NULL,
-          selling_price_pack DECIMAL(12, 2) NOT NULL,
-          selling_price_unit DECIMAL(12, 2) NOT NULL,
-          expiry_date DATE,
-          batch_number VARCHAR(100)
-        );
-        CREATE TABLE IF NOT EXISTS "${schemaName}".supplier_payments (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          supplier_id UUID,
-          purchase_id UUID,
-          amount DECIMAL(12, 2) NOT NULL,
-          payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
-          payment_method VARCHAR(50) DEFAULT 'CASH',
-          receipt_number VARCHAR(100),
-          receipt_image TEXT,
-          notes TEXT,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_supp_pay_dt" ON "${schemaName}".supplier_payments (created_at);
-        CREATE TABLE IF NOT EXISTS "${schemaName}".purchase_invoices (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          invoice_number VARCHAR(100) NOT NULL,
-          supplier_id UUID,
-          supplier_name VARCHAR(255),
-          invoice_date DATE NOT NULL DEFAULT CURRENT_DATE,
-          total_amount DECIMAL(12, 2) NOT NULL,
-          paid_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          remaining_amount DECIMAL(12, 2) NOT NULL DEFAULT 0,
-          early_discount_days INT,
-          early_discount_percent DECIMAL(5, 2),
-          early_discount_deadline DATE,
-          early_discount_amount DECIMAL(12, 2),
-          early_discount_applied BOOLEAN DEFAULT FALSE,
-          early_discount_applied_amount DECIMAL(12, 2) DEFAULT 0,
-          notes TEXT,
-          items_count INT NOT NULL DEFAULT 0,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS "${schemaName}".purchase_invoice_items (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          purchase_invoice_id UUID,
-          medicine_id UUID,
-          trade_name VARCHAR(255) NOT NULL,
-          scientific_name VARCHAR(255),
-          batch_number VARCHAR(100),
-          expiry_date DATE NOT NULL,
-          quantity_packs INT NOT NULL,
-          units_per_pack INT NOT NULL DEFAULT 1,
-          purchase_price_pack DECIMAL(12, 2) NOT NULL,
-          selling_price_pack DECIMAL(12, 2) NOT NULL,
-          total_cost DECIMAL(12, 2) NOT NULL,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-        ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS custom_name VARCHAR(255);
-        ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS is_public_visible BOOLEAN DEFAULT TRUE;
-        ALTER TABLE "${schemaName}".inventory_items ADD COLUMN IF NOT EXISTS shelf_location VARCHAR(100);
-        CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_inv_med_unique" ON "${schemaName}".inventory_items (medicine_id);
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS supplier_id UUID;
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS purchase_id UUID;
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_recalled BOOLEAN DEFAULT FALSE;
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS selling_price_pack DECIMAL(12, 2);
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS selling_price_unit DECIMAL(12, 2);
-        ALTER TABLE "${schemaName}".inventory_batches ADD COLUMN IF NOT EXISTS is_bonus BOOLEAN DEFAULT FALSE;
-        ALTER TABLE "${schemaName}".purchase_items ADD COLUMN IF NOT EXISTS amortize_bonus BOOLEAN DEFAULT TRUE;
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS address TEXT;
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS company_name VARCHAR(255);
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS balance_due DECIMAL(12, 2) DEFAULT 0;
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS notes TEXT;
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
-        ALTER TABLE "${schemaName}".suppliers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(100);
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS supplier_id UUID;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255);
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS total_gross_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS total_discount_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS net_total_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS paid_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS remaining_amount DECIMAL(12, 2) NOT NULL DEFAULT 0;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) NOT NULL DEFAULT 'PAID';
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS due_date DATE;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS notes TEXT;
-        ALTER TABLE "${schemaName}".purchases ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
-        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_percent DECIMAL(5, 2) DEFAULT 0;
-        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS discount_amount DECIMAL(12, 2) DEFAULT 0;
-        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS net_paid_amount DECIMAL(12, 2) DEFAULT 0;
-        ALTER TABLE "${schemaName}".supplier_payments ADD COLUMN IF NOT EXISTS receipt_image TEXT;
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS supplier_name VARCHAR(255);
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_days INT;
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_percent DECIMAL(5, 2);
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_deadline DATE;
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_amount DECIMAL(12, 2);
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_applied BOOLEAN DEFAULT FALSE;
-        ALTER TABLE "${schemaName}".purchase_invoices ADD COLUMN IF NOT EXISTS early_discount_applied_amount DECIMAL(12, 2) DEFAULT 0;
-      `;
-      const sqlBlock = `DO $$
-BEGIN
-${ddl}
-END $$;`;
-
-      await this.prisma.$executeRawUnsafe(sqlBlock);
-      InventoryService.verifiedSchemas.add(schemaName);
-    } catch (err: any) {
-      InventoryService.verifiedSchemas.add(schemaName);
-      this.logger.warn(`Could not verify purchase tables for ${schemaName}: ${err.message}`);
-    }
+  private async ensurePurchaseTablesExist(_schemaName: string) {
+    // No-op: All schema structures are version-controlled and applied by TenantMigrationService
+    return;
   }
 
   /**
@@ -192,22 +45,12 @@ END $$;`;
    */
   async generatePurchaseInvoiceNumber(schema: string, tx?: any): Promise<string> {
     const client = tx || this.prisma;
-    try {
-      const res: any[] = await client.$queryRawUnsafe(
-        `SELECT nextval('"${schema}".purchase_invoice_seq') as nextval;`
-      );
-      const seq = Number(res[0]?.nextval || 1);
-      const year = new Date().getFullYear();
-      return `PUR-${year}-${String(seq).padStart(5, '0')}`;
-    } catch {
-      await client.$executeRawUnsafe(`CREATE SEQUENCE IF NOT EXISTS "${schema}".purchase_invoice_seq START 1;`);
-      const res: any[] = await client.$queryRawUnsafe(
-        `SELECT nextval('"${schema}".purchase_invoice_seq') as nextval;`
-      );
-      const seq = Number(res[0]?.nextval || 1);
-      const year = new Date().getFullYear();
-      return `PUR-${year}-${String(seq).padStart(5, '0')}`;
-    }
+    const res: any[] = await client.$queryRawUnsafe(
+      `SELECT nextval('"${schema}".purchase_invoice_seq') as nextval;`
+    );
+    const seq = Number(res[0]?.nextval || 1);
+    const year = new Date().getFullYear();
+    return `PUR-${year}-${String(seq).padStart(5, '0')}`;
   }
 
   /**

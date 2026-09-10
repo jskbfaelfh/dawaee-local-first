@@ -19,7 +19,6 @@ import {
 @Injectable()
 export class StocktakeService {
   private readonly logger = new Logger(StocktakeService.name);
-  private static readonly verifiedSchemas = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -28,94 +27,12 @@ export class StocktakeService {
   ) {}
 
   /**
-   * Helper to ensure stocktake tables exist in the tenant schema
-   */
-  private async ensureStocktakeTablesExist(schemaName: string) {
-    if (StocktakeService.verifiedSchemas.has(schemaName)) {
-      return;
-    }
-
-    try {
-      await this.prisma.$executeRawUnsafe(`
-        CREATE TABLE IF NOT EXISTS "${schemaName}".stocktake_sessions (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          title VARCHAR(255) NOT NULL,
-          type VARCHAR(50) NOT NULL DEFAULT 'ANNUAL',
-          status VARCHAR(50) NOT NULL DEFAULT 'IN_PROGRESS',
-          shelf_filter VARCHAR(100),
-          notes TEXT,
-          total_system_items INT DEFAULT 0,
-          total_counted_items INT DEFAULT 0,
-          total_variance_units INT DEFAULT 0,
-          total_deficit_cost DECIMAL(14, 2) DEFAULT 0,
-          total_surplus_cost DECIMAL(14, 2) DEFAULT 0,
-          net_variance_cost DECIMAL(14, 2) DEFAULT 0,
-          created_by_user_id UUID,
-          created_by_name VARCHAR(150),
-          reconciled_by_user_id UUID,
-          reconciled_by_name VARCHAR(150),
-          reconciled_at TIMESTAMP,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-
-      await this.prisma.$executeRawUnsafe(`
-        CREATE TABLE IF NOT EXISTS "${schemaName}".stocktake_items (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          session_id UUID NOT NULL REFERENCES "${schemaName}".stocktake_sessions(id) ON DELETE CASCADE,
-          inventory_item_id UUID NOT NULL,
-          medicine_id UUID,
-          trade_name VARCHAR(255) NOT NULL,
-          scientific_name VARCHAR(255),
-          dosage_form VARCHAR(100),
-          strength VARCHAR(100),
-          barcode VARCHAR(100),
-          shelf_location VARCHAR(100),
-          units_per_pack INT NOT NULL DEFAULT 1,
-          purchase_price_pack DECIMAL(12, 2) DEFAULT 0,
-          selling_price_pack DECIMAL(12, 2) DEFAULT 0,
-          system_units INT NOT NULL DEFAULT 0,
-          system_packs INT NOT NULL DEFAULT 0,
-          system_loose INT NOT NULL DEFAULT 0,
-          counted_packs INT DEFAULT 0,
-          counted_loose INT DEFAULT 0,
-          counted_total_units INT DEFAULT 0,
-          variance_units INT DEFAULT 0,
-          variance_packs NUMERIC(10, 2) DEFAULT 0,
-          variance_cost DECIMAL(14, 2) DEFAULT 0,
-          variance_retail DECIMAL(14, 2) DEFAULT 0,
-          variance_status VARCHAR(20) DEFAULT 'UNCOUNTED',
-          counted_at TIMESTAMP,
-          notes TEXT,
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-
-      await this.prisma.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_stocktake_items_session ON "${schemaName}".stocktake_items(session_id);
-      `);
-
-      await this.prisma.$executeRawUnsafe(`
-        CREATE INDEX IF NOT EXISTS idx_stocktake_items_barcode ON "${schemaName}".stocktake_items(barcode);
-      `);
-
-      StocktakeService.verifiedSchemas.add(schemaName);
-    } catch (err) {
-      this.logger.error(`Failed to ensure stocktake tables for schema ${schemaName}:`, err);
-      throw err;
-    }
-  }
-
-  /**
    * 1. Create a new Stocktake Session (Annual, Semi-Annual, or Sectional)
    * Automatically and atomically snapshots all current inventory items, theoretical quantities,
    * and calculates true Weighted Average Cost (WAC) based on active batch quantities.
    */
   async createSession(dto: CreateStocktakeSessionDto, user: any) {
     const schemaName = this.tenantContext.getSchemaName();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     const sessionId = crypto.randomUUID();
     const type = dto.type || StocktakeType.ANNUAL;
@@ -243,7 +160,6 @@ export class StocktakeService {
    */
   async getSessions() {
     const schemaName = this.tenantContext.getSchemaName();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     const sessions: any[] = await this.prisma.$queryRawUnsafe(`
       SELECT 
@@ -279,7 +195,6 @@ export class StocktakeService {
     options?: { search?: string; shelf?: string; status?: string },
   ) {
     const schemaName = this.tenantContext.getSchemaName();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     // 3.1 Get Session Info
     const sessions: any[] = await this.prisma.$queryRawUnsafe(
@@ -424,7 +339,6 @@ export class StocktakeService {
    */
   async recordCount(sessionId: string, dto: RecordItemCountDto) {
     const schemaName = this.tenantContext.getSchemaName();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     // Verify session is in progress
     const sessionCheck: any[] = await this.prisma.$queryRawUnsafe(
@@ -565,7 +479,6 @@ export class StocktakeService {
   async reconcileSession(sessionId: string, dto: ReconcileStocktakeDto, user: any) {
     const schemaName = this.tenantContext.getSchemaName();
     const tenantId = this.tenantContext.getTenantId();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     const affectedMedicineIds: string[] = [];
 
@@ -601,10 +514,10 @@ export class StocktakeService {
 
           if (varianceUnits < 0) {
             // Deficit / Shortage: We need to deduct |varianceUnits| from batches
-            let neededDeduction = Math.abs(varianceUnits);
+            const neededDeduction = Math.abs(varianceUnits);
 
             // Fetch active, valid batches sorted by FEFO (oldest valid expiry first) with row locks
-            // Excludes expired and recalled batches to unify stock rules with POS
+            // Strictly excludes expired and recalled batches
             const batches: any[] = await tx.$queryRawUnsafe(
               `SELECT id, quantity_units_remaining
                FROM "${schemaName}".inventory_batches
@@ -617,10 +530,26 @@ export class StocktakeService {
               inventoryItemId,
             );
 
+            // Calculate total valid stock available for this medicine
+            const totalValidAvailable = batches.reduce(
+              (sum: number, b: any) => sum + (Number(b.quantity_units_remaining) || 0),
+              0,
+            );
+
+            // Production Rule: If valid stock is insufficient to cover shortage, STOP and fail-closed.
+            // Never deduct or alter expired or recalled batches.
+            if (totalValidAvailable < neededDeduction) {
+              const tradeName = item.trade_name || 'المادة المحددة';
+              throw new BadRequestException(
+                `تعذر اعتماد الجرد للمادة (${tradeName}): الرصيد الصالح المتوفر في المخزن (${totalValidAvailable} وحدة) غير كافٍ لخصم العجز المطلوب (${neededDeduction} وحدة). يمنع النظام خصم أو تعديل الوجبات المنتهية الصلاحية أو المسحوبة. الرجاء مراجعة الكميات المسجلة بالجرد.`,
+              );
+            }
+
+            let remainingToDeduct = neededDeduction;
             for (const b of batches) {
-              if (neededDeduction <= 0) break;
+              if (remainingToDeduct <= 0) break;
               const currentRemaining = Number(b.quantity_units_remaining) || 0;
-              const deductFromThisBatch = Math.min(currentRemaining, neededDeduction);
+              const deductFromThisBatch = Math.min(currentRemaining, remainingToDeduct);
 
               await tx.$executeRawUnsafe(
                 `UPDATE "${schemaName}".inventory_batches
@@ -630,32 +559,7 @@ export class StocktakeService {
                 b.id,
               );
 
-              neededDeduction -= deductFromThisBatch;
-            }
-
-            // Fallback for remaining discrepancy if active batches were insufficient
-            if (neededDeduction > 0) {
-              const fallbackBatches: any[] = await tx.$queryRawUnsafe(
-                `SELECT id, quantity_units_remaining
-                 FROM "${schemaName}".inventory_batches
-                 WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
-                 ORDER BY expiry_date ASC, created_at ASC
-                 FOR UPDATE`,
-                inventoryItemId,
-              );
-              for (const fb of fallbackBatches) {
-                if (neededDeduction <= 0) break;
-                const rem = Number(fb.quantity_units_remaining) || 0;
-                const deduct = Math.min(rem, neededDeduction);
-                await tx.$executeRawUnsafe(
-                  `UPDATE "${schemaName}".inventory_batches
-                   SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
-                   WHERE id = $2::uuid`,
-                  deduct,
-                  fb.id,
-                );
-                neededDeduction -= deduct;
-              }
+              remainingToDeduct -= deductFromThisBatch;
             }
           } else if (varianceUnits > 0) {
             // Surplus: Restrict to active, non-expired, non-recalled batches
@@ -740,7 +644,6 @@ export class StocktakeService {
    */
   async deleteSession(sessionId: string) {
     const schemaName = this.tenantContext.getSchemaName();
-    await this.ensureStocktakeTablesExist(schemaName);
 
     const sessionCheck: any[] = await this.prisma.$queryRawUnsafe(
       `SELECT status FROM "${schemaName}".stocktake_sessions WHERE id = $1::uuid LIMIT 1`,

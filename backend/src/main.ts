@@ -5,6 +5,7 @@ import { json, urlencoded } from 'express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { validateStartupSecurity, isOriginAllowed, getAllowedOriginsList } from './common/utils/security.util';
+import { TenantMigrationService } from './database/migrations/tenant-migration.service';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -13,6 +14,15 @@ async function bootstrap() {
   validateStartupSecurity();
 
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // Run automated multi-tenant database migrations on bootstrap
+  try {
+    const tenantMigrationService = app.get(TenantMigrationService);
+    logger.log('Checking and synchronizing tenant database schemas...');
+    await tenantMigrationService.migrateAllTenants();
+  } catch (migErr: any) {
+    logger.error(`Tenant migration bootstrap error: ${migErr.message}`);
+  }
 
   // Parse cookies for secure HttpOnly session tokens
   app.use(cookieParser());
