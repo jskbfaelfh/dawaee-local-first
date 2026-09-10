@@ -266,7 +266,7 @@ export const DEV_ORIGINS = [
  * Strictly excludes wildcard '*' when credentials: true is required.
  */
 export function getAllowedOriginsList(): string[] {
-  const envOrigins = [process.env.ALLOWED_ORIGINS, process.env.FRONTEND_URL]
+  const envOrigins = [process.env.CORS_ORIGINS, process.env.ALLOWED_ORIGINS, process.env.FRONTEND_URL]
     .filter(Boolean)
     .join(',')
     .split(',')
