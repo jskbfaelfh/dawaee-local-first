@@ -75,9 +75,10 @@ async function bootstrap() {
       }
 
       logger.warn(`Blocked unauthorized CORS request from origin: ${origin}`);
-      return callback(new Error(`Origin ${origin} not allowed by CORS`));
+      return callback(null, false);
     },
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: 'Content-Type,Accept,Authorization,X-Requested-With',
     credentials: true,
   });
 

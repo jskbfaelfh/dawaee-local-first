@@ -304,7 +304,7 @@ export function getAllowedOriginsList(): string[] {
     .filter(Boolean)
     .join(',')
     .split(',')
-    .map((o) => o.trim().toLowerCase())
+    .map((o) => o.trim().toLowerCase().replace(/\/$/, ''))
     .filter((o) => o.length > 0 && o !== '*'); // Exclude wildcard '*'
 
   const isProd = process.env.NODE_ENV === 'production';
@@ -319,13 +319,14 @@ export function getAllowedOriginsList(): string[] {
  * Checks if a specific incoming HTTP or WebSocket origin is authorized.
  * - Allows requests without origin header (mobile apps, server-to-server, curl)
  * - Validates against strict origin whitelist
+ * - Automatically supports configured deployment domains (e.g. railway.app, vercel.app)
  */
 export function isOriginAllowed(origin?: string | null): boolean {
   if (!origin) {
     return true; // Mobile apps, Postman, server-to-server
   }
 
-  const normalized = origin.trim().toLowerCase();
+  const normalized = origin.trim().toLowerCase().replace(/\/$/, '');
   const allowedList = getAllowedOriginsList();
 
   // If no origins configured and in dev mode, fallback to dev origins
@@ -333,5 +334,26 @@ export function isOriginAllowed(origin?: string | null): boolean {
     return DEV_ORIGINS.some((d) => d.toLowerCase() === normalized);
   }
 
-  return allowedList.includes(normalized);
+  if (allowedList.includes(normalized)) {
+    return true;
+  }
+
+  // Auto-allow Railway and Vercel cloud domains if deployed there
+  try {
+    const parsed = new URL(normalized);
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      hostname.endsWith('.railway.app') ||
+      hostname.endsWith('.up.railway.app') ||
+      hostname.endsWith('.vercel.app') ||
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1'
+    ) {
+      return true;
+    }
+  } catch {
+    // If origin is not a standard URL, fallback to direct string matching
+  }
+
+  return false;
 }
