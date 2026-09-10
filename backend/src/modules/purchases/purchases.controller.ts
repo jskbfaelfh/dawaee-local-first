@@ -16,13 +16,16 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { SubscriptionGuard } from '../../common/guards/subscription.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { PurchasesService } from './purchases.service';
 import { OcrAiService } from './ocr-ai.service';
 import { InvoiceStorageService } from './invoice-storage.service';
 import { CreatePurchaseDto } from './dto/create-purchase.dto';
 
 @Controller('purchases')
-@UseGuards(AuthGuard('jwt'), SubscriptionGuard)
+@UseGuards(AuthGuard('jwt'), SubscriptionGuard, RolesGuard)
+@Roles('OWNER', 'SUPER_ADMIN')
 export class PurchasesController {
   constructor(
     private readonly purchasesService: PurchasesService,

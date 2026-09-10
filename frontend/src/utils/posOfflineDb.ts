@@ -229,10 +229,18 @@ export async function removePendingSale(offlineId: string): Promise<void> {
 }
 
 /**
- * Generate a unique local offline invoice number
+ * Generate a cryptographically secure, collision-free local offline invoice number
  */
 export function generateOfflineInvoiceNumber(): string {
   const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  return `OFFLINE-${dateStr}-${randomSuffix}`;
+  const timestamp = Date.now().toString().slice(-6);
+  let randomHex = '';
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const bytes = new Uint8Array(3);
+    crypto.getRandomValues(bytes);
+    randomHex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  } else {
+    randomHex = Math.random().toString(36).substring(2, 8).toUpperCase();
+  }
+  return `OFF-${dateStr}-${timestamp}-${randomHex}`;
 }

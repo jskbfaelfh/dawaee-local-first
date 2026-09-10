@@ -1,11 +1,24 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { SubscriptionGuard } from '../../common/guards/subscription.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto } from './dto/create-expense.dto';
 
 @Controller('expenses')
-@UseGuards(AuthGuard('jwt'), SubscriptionGuard)
+@UseGuards(AuthGuard('jwt'), SubscriptionGuard, RolesGuard)
+@Roles('OWNER', 'SUPER_ADMIN')
 export class ExpensesController {
   constructor(private readonly expensesService: ExpensesService) {}
 

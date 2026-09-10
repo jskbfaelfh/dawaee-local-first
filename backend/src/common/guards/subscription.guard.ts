@@ -29,8 +29,27 @@ export class SubscriptionGuard implements CanActivate {
     const method = request.method?.toUpperCase();
     const url = request.url || '';
 
-    const user = request.user;
+    let user = request.user;
     const ctx = this.tenantContext.getContext();
+
+    // Fallback token extraction if user is not yet populated
+    if (!user) {
+      try {
+        const authHeader = request.headers?.authorization;
+        const cookieToken = request.cookies?.dawaee_token;
+        const rawToken = authHeader?.startsWith('Bearer ')
+          ? authHeader.substring(7)
+          : cookieToken;
+        if (rawToken) {
+          const parts = rawToken.split('.');
+          if (parts.length === 3) {
+            const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
+            user = JSON.parse(payloadJson);
+          }
+        }
+      } catch {}
+    }
+
     const subscriptionStatus = user?.subscriptionStatus || ctx?.subscriptionStatus;
 
     if (!subscriptionStatus) {

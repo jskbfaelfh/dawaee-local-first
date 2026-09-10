@@ -603,11 +603,15 @@ export class StocktakeService {
             // Deficit / Shortage: We need to deduct |varianceUnits| from batches
             let neededDeduction = Math.abs(varianceUnits);
 
-            // Fetch active batches sorted by FEFO (oldest expiry first) with row locks
+            // Fetch active, valid batches sorted by FEFO (oldest valid expiry first) with row locks
+            // Excludes expired and recalled batches to unify stock rules with POS
             const batches: any[] = await tx.$queryRawUnsafe(
               `SELECT id, quantity_units_remaining
                FROM "${schemaName}".inventory_batches
-               WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
+               WHERE inventory_item_id = $1::uuid 
+                 AND quantity_units_remaining > 0
+                 AND expiry_date >= CURRENT_DATE
+                 AND (is_recalled IS FALSE OR is_recalled IS NULL)
                ORDER BY expiry_date ASC, created_at ASC
                FOR UPDATE`,
               inventoryItemId,
@@ -627,6 +631,31 @@ export class StocktakeService {
               );
 
               neededDeduction -= deductFromThisBatch;
+            }
+
+            // Fallback for remaining discrepancy if active batches were insufficient
+            if (neededDeduction > 0) {
+              const fallbackBatches: any[] = await tx.$queryRawUnsafe(
+                `SELECT id, quantity_units_remaining
+                 FROM "${schemaName}".inventory_batches
+                 WHERE inventory_item_id = $1::uuid AND quantity_units_remaining > 0
+                 ORDER BY expiry_date ASC, created_at ASC
+                 FOR UPDATE`,
+                inventoryItemId,
+              );
+              for (const fb of fallbackBatches) {
+                if (neededDeduction <= 0) break;
+                const rem = Number(fb.quantity_units_remaining) || 0;
+                const deduct = Math.min(rem, neededDeduction);
+                await tx.$executeRawUnsafe(
+                  `UPDATE "${schemaName}".inventory_batches
+                   SET quantity_units_remaining = GREATEST(0, quantity_units_remaining - $1)
+                   WHERE id = $2::uuid`,
+                  deduct,
+                  fb.id,
+                );
+                neededDeduction -= deduct;
+              }
             }
           } else if (varianceUnits > 0) {
             // Surplus: Restrict to active, non-expired, non-recalled batches

@@ -59,9 +59,9 @@ export class BackupService {
     };
 
     // 3. Extract all 16 tables
-    // Users: strictly omitting password_hash to prevent credential leakage and offline cracking
+    // Users: export account records including cryptographic password_hash for exact disaster recovery
     const users = await extractTable("users", `
-      SELECT id, name, username, role, is_active as "isActive", created_at as "createdAt"
+      SELECT id, name, username, password_hash as "passwordHash", role, is_active as "isActive", created_at as "createdAt"
       FROM "${schemaName}".users;
     `);
 
@@ -209,7 +209,7 @@ export class BackupService {
     // Transactional full restore across all 15 system tables in exact foreign key order
     await this.prisma.$transaction(
       async (tx) => {
-        // 1. Users (upsert accounts, preserving existing password if hash omitted in backup)
+        // 1. Users: restore exact credentials for seamless disaster recovery
         await this.bulkInsert(
           tx,
           schemaName,
@@ -217,18 +217,25 @@ export class BackupService {
           ['id', 'name', 'username', 'password_hash', 'role', 'is_active', 'created_at'],
           users,
           { 0: 'uuid', 1: 'text', 2: 'text', 3: 'text', 4: 'text', 5: 'boolean', 6: 'timestamp' },
-          (u: any) => [
-            u.id,
-            u.name,
-            u.username,
-            u.passwordHash || u.password_hash || '$2b$10$e8wFp1P/o1Z5y6B6g0sM9eA2D0L3uYv7tK9v1W3x5z7y9b1d3f5h7',
-            u.role || 'CASHIER',
-            u.isActive ?? u.is_active ?? true,
-            u.createdAt || u.created_at || new Date(),
-          ],
+          (u: any) => {
+            const passwordHash = u.passwordHash || u.password_hash;
+            if (!passwordHash) {
+              throw new BadRequestException(`فشلت استعادة حساب المستخدم (${u.username || u.id}) لعدم وجود رمز التشفير (password_hash).`);
+            }
+            return [
+              u.id,
+              u.name,
+              u.username,
+              passwordHash,
+              u.role || 'CASHIER',
+              u.isActive ?? u.is_active ?? true,
+              u.createdAt || u.created_at || new Date(),
+            ];
+          },
           `ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
             username = EXCLUDED.username,
+            password_hash = EXCLUDED.password_hash,
             role = EXCLUDED.role,
             is_active = EXCLUDED.is_active`,
         );
