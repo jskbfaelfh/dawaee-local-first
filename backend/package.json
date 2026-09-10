@@ -20,7 +20,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json --forceExit",
     "test:business": "jest --config ./test/jest-business.json --runInBand --forceExit",
     "cron:backup": "ts-node scripts/r2-daily-backup.ts",
-    "migrate:public": "prisma db push",
+    "migrate:public": "prisma migrate deploy",
     "migrate:tenants": "ts-node scripts/migrate-tenants.ts",
     "migrate": "npm run migrate:public && npm run migrate:tenants",
     "postinstall": "npx prisma generate"

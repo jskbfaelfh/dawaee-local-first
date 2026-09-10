@@ -8,6 +8,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
+import { AuditLogService } from '../audit/audit.service';
+import { AuditAction, AuditEntityType } from '../audit/dto/audit-log.dto';
 import {
   CreateStocktakeSessionDto,
   RecordItemCountDto,
@@ -24,12 +26,13 @@ export class StocktakeService {
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   /**
    * 1. Create a new Stocktake Session (Annual, Semi-Annual, or Sectional)
-   * Automatically and atomically snapshots all current inventory items, theoretical quantities,
-   * and calculates true Weighted Average Cost (WAC) based on active batch quantities.
+   * Atomically snapshots all current inventory items and theoretical quantities inside a single ACID transaction.
+   * Calculates true Weighted Average Cost (WAC) based on active batch quantities.
    */
   async createSession(dto: CreateStocktakeSessionDto, user: any) {
     const schemaName = this.tenantContext.getSchemaName();
@@ -45,114 +48,107 @@ export class StocktakeService {
       shelfCondition = `WHERE ii.shelf_location = $2`;
     }
 
-    try {
-      // 1.1 Insert Session record
-      await this.prisma.$executeRawUnsafe(
-        `INSERT INTO "${schemaName}".stocktake_sessions
-         (id, title, type, status, shelf_filter, notes, created_by_user_id, created_by_name, created_at, updated_at)
-         VALUES ($1::uuid, $2, $3, 'IN_PROGRESS', $4, $5, $6::uuid, $7, NOW(), NOW())`,
-        sessionId,
-        dto.title.trim(),
-        type,
-        shelfFilter,
-        dto.notes || null,
-        user?.id || null,
-        user?.name || 'مدير الصيدلية',
-      );
+    return await this.prisma.$transaction(
+      async (tx) => {
+        // 1.1 Insert Session record
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "${schemaName}".stocktake_sessions
+           (id, title, type, status, shelf_filter, notes, created_by_user_id, created_by_name, created_at, updated_at)
+           VALUES ($1::uuid, $2, $3, 'IN_PROGRESS', $4, $5, $6::uuid, $7, NOW(), NOW())`,
+          sessionId,
+          dto.title.trim(),
+          type,
+          shelfFilter,
+          dto.notes || null,
+          user?.id || null,
+          user?.name || 'مدير الصيدلية',
+        );
 
-      // 1.2 High-Performance Atomic Snapshot with Weighted Average Cost (WAC)
-      // Solves Point 10 (Transaction atomicity) and Point 11 (Weighted Moving Average Cost)
-      const insertSql = `
-        INSERT INTO "${schemaName}".stocktake_items (
-          id, session_id, inventory_item_id, medicine_id, trade_name, scientific_name,
-          dosage_form, strength, barcode, shelf_location, units_per_pack,
-          purchase_price_pack, selling_price_pack, system_units, system_packs,
-          system_loose, variance_status, created_at, updated_at
-        )
-        SELECT 
-          gen_random_uuid(),
-          $1::uuid,
-          sub."inventoryItemId",
-          sub."medicineId",
-          sub."tradeName",
-          sub."scientificName",
-          sub."dosageForm",
-          sub."strength",
-          sub."barcode",
-          sub."shelfLocation",
-          sub."unitsPerPack",
-          ROUND(sub."weightedAvgCostPack", 2),
-          ROUND(sub."sellingPricePack", 2),
-          sub."systemUnits",
-          FLOOR(sub."systemUnits" / sub."unitsPerPack")::int,
-          (sub."systemUnits" % sub."unitsPerPack")::int,
-          'UNCOUNTED',
-          NOW(),
-          NOW()
-        FROM (
+        // 1.2 High-Performance Atomic Snapshot with Weighted Average Cost (WAC)
+        const insertSql = `
+          INSERT INTO "${schemaName}".stocktake_items (
+            id, session_id, inventory_item_id, medicine_id, trade_name, scientific_name,
+            dosage_form, strength, barcode, shelf_location, units_per_pack,
+            purchase_price_pack, selling_price_pack, system_units, system_packs,
+            system_loose, variance_status, created_at, updated_at
+          )
           SELECT 
-            ii.id as "inventoryItemId",
-            ii.medicine_id as "medicineId",
-            COALESCE(ii.custom_name, m.trade_name) as "tradeName",
-            m.scientific_name as "scientificName",
-            m.dosage_form as "dosageForm",
-            m.strength,
-            m.barcode,
-            ii.shelf_location as "shelfLocation",
-            GREATEST(ii.units_per_pack, 1)::int as "unitsPerPack",
-            COALESCE(ii.selling_price_pack, 0)::numeric as "sellingPricePack",
-            COALESCE(
-              CASE 
-                WHEN SUM(b.quantity_units_remaining) > 0 
-                THEN SUM(b.purchase_price_pack * b.quantity_units_remaining) / SUM(b.quantity_units_remaining)
-                ELSE AVG(b.purchase_price_pack)
-              END,
-              ii.selling_price_pack,
-              0
-            )::numeric as "weightedAvgCostPack",
-            COALESCE(SUM(b.quantity_units_remaining), 0)::int as "systemUnits"
-          FROM "${schemaName}".inventory_items ii
-          JOIN public.medicines m ON ii.medicine_id = m.id
-          LEFT JOIN "${schemaName}".inventory_batches b ON ii.id = b.inventory_item_id AND b.quantity_units_remaining > 0
-          ${shelfCondition}
-          GROUP BY ii.id, m.id
-          ORDER BY COALESCE(ii.custom_name, m.trade_name) ASC
-        ) sub;
-      `;
+            gen_random_uuid(),
+            $1::uuid,
+            sub."inventoryItemId",
+            sub."medicineId",
+            sub."tradeName",
+            sub."scientificName",
+            sub."dosageForm",
+            sub."strength",
+            sub."barcode",
+            sub."shelfLocation",
+            sub."unitsPerPack",
+            ROUND(sub."weightedAvgCostPack", 2),
+            ROUND(sub."sellingPricePack", 2),
+            sub."systemUnits",
+            FLOOR(sub."systemUnits" / sub."unitsPerPack")::int,
+            (sub."systemUnits" % sub."unitsPerPack")::int,
+            'UNCOUNTED',
+            NOW(),
+            NOW()
+          FROM (
+            SELECT 
+              ii.id as "inventoryItemId",
+              ii.medicine_id as "medicineId",
+              COALESCE(ii.custom_name, m.trade_name) as "tradeName",
+              m.scientific_name as "scientificName",
+              m.dosage_form as "dosageForm",
+              m.strength,
+              m.barcode,
+              ii.shelf_location as "shelfLocation",
+              GREATEST(ii.units_per_pack, 1)::int as "unitsPerPack",
+              COALESCE(ii.selling_price_pack, 0)::numeric as "sellingPricePack",
+              COALESCE(
+                CASE 
+                  WHEN SUM(b.quantity_units_remaining) > 0 
+                  THEN SUM(b.purchase_price_pack * b.quantity_units_remaining) / SUM(b.quantity_units_remaining)
+                  ELSE AVG(b.purchase_price_pack)
+                END,
+                ii.selling_price_pack,
+                0
+              )::numeric as "weightedAvgCostPack",
+              COALESCE(SUM(b.quantity_units_remaining), 0)::int as "systemUnits"
+            FROM "${schemaName}".inventory_items ii
+            JOIN public.medicines m ON ii.medicine_id = m.id
+            LEFT JOIN "${schemaName}".inventory_batches b ON ii.id = b.inventory_item_id AND b.quantity_units_remaining > 0
+            ${shelfCondition}
+            GROUP BY ii.id, m.id
+            ORDER BY COALESCE(ii.custom_name, m.trade_name) ASC
+          ) sub;
+        `;
 
-      await this.prisma.$executeRawUnsafe(insertSql, ...sqlParams);
+        await tx.$executeRawUnsafe(insertSql, ...sqlParams);
 
-      // 1.3 Count snapshot items and update session totals
-      const countRes: any[] = await this.prisma.$queryRawUnsafe(
-        `SELECT COUNT(*)::int as total FROM "${schemaName}".stocktake_items WHERE session_id = $1::uuid;`,
-        sessionId,
-      );
-      const totalItems = Number(countRes[0]?.total || 0);
+        // 1.3 Count snapshot items and update session totals
+        const countRes: any[] = await tx.$queryRawUnsafe(
+          `SELECT COUNT(*)::int as total FROM "${schemaName}".stocktake_items WHERE session_id = $1::uuid;`,
+          sessionId,
+        );
+        const totalItems = Number(countRes[0]?.total || 0);
 
-      await this.prisma.$executeRawUnsafe(
-        `UPDATE "${schemaName}".stocktake_sessions
-         SET total_system_items = $1
-         WHERE id = $2::uuid`,
-        totalItems,
-        sessionId,
-      );
+        await tx.$executeRawUnsafe(
+          `UPDATE "${schemaName}".stocktake_sessions
+           SET total_system_items = $1
+           WHERE id = $2::uuid`,
+          totalItems,
+          sessionId,
+        );
 
-      return {
-        success: true,
-        sessionId,
-        totalItems,
-        message: `تم إنشاء جلسة الجرد بنجاح وإدراج (${totalItems}) مادة للبدء بالعد الفعلي.`,
-      };
-    } catch (err: any) {
-      this.logger.error(`Stocktake session creation failed on schema ${schemaName}: ${err.message}`);
-      try {
-        await this.prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}".stocktake_items WHERE session_id = $1::uuid;`, sessionId);
-        await this.prisma.$executeRawUnsafe(`DELETE FROM "${schemaName}".stocktake_sessions WHERE id = $1::uuid;`, sessionId);
-      } catch (rbErr: any) {
-        this.logger.error(`Failed to rollback orphaned stocktake session: ${rbErr.message}`);
-      }
-      throw err;
-    }
+        return {
+          success: true,
+          sessionId,
+          totalItems,
+          message: `تم إنشاء جلسة الجرد بنجاح وإدراج (${totalItems}) مادة للبدء بالعد الفعلي.`,
+        };
+      },
+      { timeout: 60000, maxWait: 15000 },
+    );
   }
 
   /**
@@ -624,6 +620,23 @@ export class StocktakeService {
       },
       { timeout: 60000, maxWait: 15000 },
     );
+
+    // 5.4 Record Enterprise Audit Log Entry
+    await this.auditLogService.log({
+      userId: user?.id || null,
+      userName: user?.name || 'مدير الصيدلية',
+      userRole: user?.role || 'OWNER',
+      action: AuditAction.RECONCILE_STOCKTAKE,
+      entityType: AuditEntityType.STOCKTAKE_SESSION,
+      entityId: sessionId,
+      description: `اعتماد محضر جرد المخزن وتسوية أرصدة (${adjustedCount}) مادة في الصيدلية`,
+      details: {
+        sessionId,
+        adjustedItemsCount: adjustedCount,
+        reconciledByName: user?.name || 'مدير الصيدلية',
+        notes: dto.notes || null,
+      },
+    }, schemaName);
 
     // 5.5 Emit Live Inventory Sync Event to update all POS clients & inventory views
     this.eventEmitter.emit('inventory.synced', {

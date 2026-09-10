@@ -17,6 +17,8 @@ import {
   RecordSupplierPaymentDto,
   ReturnToSupplierDto,
 } from './dto/bulk-stock-entry.dto';
+import { AuditLogService } from '../audit/audit.service';
+import { AuditAction, AuditEntityType } from '../audit/dto/audit-log.dto';
 
 @Injectable()
 export class InventoryService {
@@ -28,6 +30,7 @@ export class InventoryService {
     private readonly tenantContext: TenantContextService,
     private readonly medicinesService: MedicinesService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   /**
@@ -1271,7 +1274,7 @@ export class InventoryService {
   /**
    * Set Recall (Block / Unblock) for a batch number
    */
-  async setBatchRecall(batchNumber: string, isRecalled: boolean) {
+  async setBatchRecall(batchNumber: string, isRecalled: boolean, user?: any) {
     if (!batchNumber || batchNumber.trim().length === 0) {
       throw new BadRequestException('رقم التشغيلة مطلوب لتنفيذ إجراء السحب أو القفل');
     }
@@ -1287,6 +1290,22 @@ export class InventoryService {
       batchNumber.trim(),
     );
 
+    await this.auditLogService.log(
+      {
+        userId: user?.id || null,
+        userName: user?.name || 'مدير الصيدلية',
+        userRole: user?.role || 'OWNER',
+        action: isRecalled ? 'BATCH_RECALL' : 'BATCH_UNRECALL',
+        entityType: AuditEntityType.INVENTORY_BATCH,
+        entityId: batchNumber.trim(),
+        description: isRecalled
+          ? `قفل وسحب التشغيلة رقم (${batchNumber.trim()}) ومنع صرفها من الكاشير`
+          : `إلغاء قفل التشغيلة رقم (${batchNumber.trim()}) وإعادتها للبيع`,
+        details: { batchNumber: batchNumber.trim(), isRecalled, affectedRows: res },
+      },
+      schemaName,
+    );
+
     return {
       success: true,
       updatedCount: res,
@@ -1299,12 +1318,16 @@ export class InventoryService {
   /**
    * Update selling price, custom name, or low stock alert for an inventory item
    */
-  async updateItemPrice(inventoryItemId: string, dto: UpdateItemPriceDto) {
+  async updateItemPrice(inventoryItemId: string, dto: UpdateItemPriceDto, user?: any) {
     const schemaName = this.tenantContext.getSchemaName();
     const tenantId = this.tenantContext.getTenantId();
 
     const check: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT medicine_id FROM "${schemaName}".inventory_items WHERE id = $1::uuid`,
+      `SELECT ii.medicine_id, ii.custom_name, ii.selling_price_pack, ii.selling_price_unit, ii.units_per_pack,
+              m.trade_name
+       FROM "${schemaName}".inventory_items ii
+       LEFT JOIN public.medicines m ON ii.medicine_id = m.id
+       WHERE ii.id = $1::uuid LIMIT 1`,
       inventoryItemId,
     );
 
@@ -1312,7 +1335,9 @@ export class InventoryService {
       throw new NotFoundException('المادة غير موجودة في المخزون');
     }
 
-    const medicineId = check[0].medicine_id;
+    const current = check[0];
+    const medicineId = current.medicine_id;
+    const tradeName = current.custom_name || current.trade_name || 'دواء مسجل';
 
     await this.prisma.$executeRawUnsafe(
       `UPDATE "${schemaName}".inventory_items
@@ -1329,6 +1354,33 @@ export class InventoryService {
       dto.minAlertUnits || null,
       dto.shelfLocation !== undefined ? dto.shelfLocation : null,
       inventoryItemId,
+    );
+
+    // Record Enterprise Audit Log Entry
+    await this.auditLogService.log(
+      {
+        userId: user?.id || null,
+        userName: user?.name || 'مدير الصيدلية',
+        userRole: user?.role || 'OWNER',
+        action: AuditAction.UPDATE_PRICE,
+        entityType: AuditEntityType.INVENTORY_ITEM,
+        entityId: inventoryItemId,
+        description: `تعديل سعر المادة: (${tradeName}) من (${Number(current.selling_price_pack).toLocaleString()} د.ع للعلبة / ${Number(current.selling_price_unit).toLocaleString()} د.ع للشريط) إلى (${Number(dto.sellingPricePack).toLocaleString()} د.ع للعلبة / ${Number(dto.sellingPriceUnit).toLocaleString()} د.ع للشريط)`,
+        details: {
+          inventoryItemId,
+          medicineId,
+          tradeName,
+          previous: {
+            sellingPricePack: Number(current.selling_price_pack),
+            sellingPriceUnit: Number(current.selling_price_unit),
+          },
+          updated: {
+            sellingPricePack: Number(dto.sellingPricePack),
+            sellingPriceUnit: Number(dto.sellingPriceUnit),
+          },
+        },
+      },
+      schemaName,
     );
 
     // Emit sync event
@@ -1601,11 +1653,11 @@ export class InventoryService {
   /**
    * Return near-expiry or defective batch to the supplier and deduct from debt
    */
-  async returnBatchToSupplier(batchId: string, dto: ReturnToSupplierDto) {
+  async returnBatchToSupplier(batchId: string, dto: ReturnToSupplierDto, user?: any) {
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
-    return this.prisma.$transaction(
+    const res: any = await this.prisma.$transaction(
       async (tx) => {
         // 1. Fetch batch details
         const batchRows: any[] = await tx.$queryRawUnsafe(`
@@ -1729,6 +1781,25 @@ export class InventoryService {
         timeout: 45000,
       }
     );
+
+    // Record Enterprise Audit Log Entry
+    if (res?.voucher) {
+      await this.auditLogService.log(
+        {
+          userId: user?.id || null,
+          userName: user?.name || 'مدير الصيدلية',
+          userRole: user?.role || 'OWNER',
+          action: AuditAction.RETURN_TO_SUPPLIER,
+          entityType: AuditEntityType.RETURN,
+          entityId: batchId,
+          description: `إرجاع (${res.voucher.returnedPacks}) علبة من الدواء (${res.voucher.tradeName}) للمذخر (${res.voucher.supplierName}) بقيمة (${res.voucher.refundTotal.toLocaleString()} د.ع)`,
+          details: res.voucher,
+        },
+        schemaName,
+      );
+    }
+
+    return res;
   }
 
   /**

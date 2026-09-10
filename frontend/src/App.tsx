@@ -23,6 +23,7 @@ import {
   PinOff,
   Clock,
   ClipboardCheck,
+  Shield,
 } from 'lucide-react';
 import { PosView } from './views/PosView';
 import { BulkStockEntryView } from './views/BulkStockEntryView';
@@ -38,6 +39,7 @@ import { PublicSearchView } from './views/PublicSearchView';
 import { PharmacyProfileView } from './views/PharmacyProfileView';
 import { SuppliersDebtView } from './views/SuppliersDebtView';
 import { ChainManagementView } from './views/ChainManagementView';
+import { AuditLogsView } from './views/AuditLogsView';
 import { LoginView } from './views/LoginView';
 import { ProactiveAlertsModal } from './components/ProactiveAlertsModal';
 import {
@@ -64,6 +66,7 @@ type ActiveTab =
   | 'SUPPLIERS'
   | 'REPORTS'
   | 'PROFILE'
+  | 'AUDIT_LOGS'
   | 'ADMIN'
   | 'PUBLIC_SEARCH'
   | 'LOGIN';
@@ -418,6 +421,12 @@ export const App: React.FC = () => {
                 icon={ShieldCheck}
                 activeColor="bg-indigo-600 text-white shadow-md shadow-indigo-900/30"
               />
+              <NavItem
+                tab="AUDIT_LOGS"
+                label="سجل الرقابة والأمان"
+                icon={Shield}
+                activeColor="bg-rose-700 text-white shadow-md shadow-rose-900/30"
+              />
             </>
           ) : (
             <>
@@ -508,6 +517,12 @@ export const App: React.FC = () => {
                     activeColor="bg-slate-800 border border-slate-700 text-emerald-400 shadow-md"
                   />
                   <NavItem
+                    tab="AUDIT_LOGS"
+                    label="سجل الرقابة والأمان"
+                    icon={Shield}
+                    activeColor="bg-rose-700 text-white shadow-md shadow-rose-900/30"
+                  />
+                  <NavItem
                     tab="PROFILE"
                     label="الإعدادات"
                     icon={Settings}
@@ -591,6 +606,7 @@ export const App: React.FC = () => {
                 {activeTab === 'SUPPLIERS' && 'المذاخر والديون'}
                 {activeTab === 'REPORTS' && 'التقارير'}
                 {activeTab === 'OWNER_DASHBOARD' && 'المتابعة'}
+                {activeTab === 'AUDIT_LOGS' && 'سجل الرقابة والأمان'}
                 {activeTab === 'PROFILE' && 'الإعدادات'}
                 {activeTab === 'ADMIN' && 'لوحة التحكم'}
               </span>
@@ -740,6 +756,7 @@ export const App: React.FC = () => {
             />
           )}
           {activeTab === 'OWNER_DASHBOARD' && <OwnerMobileDashboardView />}
+          {activeTab === 'AUDIT_LOGS' && <AuditLogsView />}
           {activeTab === 'SUPPLIERS' && <SuppliersDebtView />}
           {activeTab === 'REPORTS' && <ReportsView />}
           {activeTab === 'PROFILE' && <PharmacyProfileView />}

@@ -16,6 +16,8 @@ import {
   CreateCashierDto,
   ResetCashierPasswordDto,
 } from './dto/update-profile.dto';
+import { AuditLogService } from '../audit/audit.service';
+import { AuditAction, AuditEntityType } from '../audit/dto/audit-log.dto';
 
 @Injectable()
 export class ProfileService {
@@ -24,6 +26,7 @@ export class ProfileService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   /**
@@ -102,6 +105,8 @@ export class ProfileService {
    */
   async updatePharmacyProfile(dto: UpdatePharmacyProfileDto) {
     const tenantId = this.tenantContext.getTenantId();
+    const schemaName = this.tenantContext.getSchemaName();
+    const ctx = this.tenantContext.getContext();
 
     const updateData: any = {};
     if (dto.name) updateData.name = dto.name;
@@ -154,6 +159,21 @@ export class ProfileService {
     });
 
     this.logger.log(`Pharmacy profile updated for tenant ${tenantId}`);
+
+    // Audit log profile change
+    await this.auditLogService.log(
+      {
+        userId: ctx?.userId || null,
+        userName: 'صاحب الصيدلية',
+        userRole: 'OWNER',
+        action: AuditAction.UPDATE_PHARMACY_PROFILE,
+        entityType: AuditEntityType.PHARMACY_PROFILE,
+        entityId: tenantId,
+        description: `تحديث بيانات وإعدادات الصيدلية (${updated.name})`,
+        details: { updatedFields: Object.keys(updateData) },
+      },
+      schemaName,
+    );
 
     const sanitizedPharmacy = {
       ...updated,
@@ -214,6 +234,19 @@ export class ProfileService {
       userId,
     );
 
+    await this.auditLogService.log(
+      {
+        userId,
+        userName: 'صاحب الصيدلية',
+        userRole: 'OWNER',
+        action: AuditAction.CHANGE_OWNER_PASSWORD,
+        entityType: AuditEntityType.USER,
+        entityId: userId,
+        description: 'تغيير كلمة المرور الشخصية لحساب المالك',
+      },
+      schemaName,
+    );
+
     this.logger.log(`Owner password updated successfully in schema ${schemaName}`);
 
     return {
@@ -227,6 +260,7 @@ export class ProfileService {
    */
   async createCashier(dto: CreateCashierDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    const ctx = this.tenantContext.getContext();
 
     const weakCheck = isWeakPassword(dto.password);
     if (weakCheck.isWeak) {
@@ -257,6 +291,20 @@ export class ProfileService {
       hash,
     );
 
+    await this.auditLogService.log(
+      {
+        userId: ctx?.userId || null,
+        userName: 'صاحب الصيدلية',
+        userRole: 'OWNER',
+        action: AuditAction.USER_CREATE,
+        entityType: AuditEntityType.USER,
+        entityId: newId,
+        description: `إنشاء حساب كاشير جديد: (${dto.name}) باسم مستخدم (@${cleanUsername})`,
+        details: { cashierId: newId, name: dto.name, username: cleanUsername, role: 'CASHIER' },
+      },
+      schemaName,
+    );
+
     this.logger.log(`Cashier "${cleanUsername}" created in tenant schema "${schemaName}"`);
 
     return {
@@ -276,6 +324,7 @@ export class ProfileService {
    */
   async resetCashierPassword(cashierId: string, dto: ResetCashierPasswordDto) {
     const schemaName = this.tenantContext.getSchemaName();
+    const ctx = this.tenantContext.getContext();
 
     const weakCheck = isWeakPassword(dto.newPassword);
     if (weakCheck.isWeak) {
@@ -284,7 +333,7 @@ export class ProfileService {
 
     // Verify it's a cashier
     const rows: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT id, role, name FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
+      `SELECT id, role, name, username FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
       cashierId,
     );
 
@@ -304,6 +353,20 @@ export class ProfileService {
       cashierId,
     );
 
+    await this.auditLogService.log(
+      {
+        userId: ctx?.userId || null,
+        userName: 'صاحب الصيدلية',
+        userRole: 'OWNER',
+        action: AuditAction.USER_PASSWORD_RESET,
+        entityType: AuditEntityType.USER,
+        entityId: cashierId,
+        description: `إعادة تعيين كلمة مرور الكاشير (${targetUser.name}) - @${targetUser.username}`,
+        details: { cashierId, username: targetUser.username, name: targetUser.name },
+      },
+      schemaName,
+    );
+
     return {
       success: true,
       message: `تم تغيير كلمة مرور الكاشير (${targetUser.name}) بنجاح`,
@@ -315,9 +378,10 @@ export class ProfileService {
    */
   async deleteCashier(cashierId: string) {
     const schemaName = this.tenantContext.getSchemaName();
+    const ctx = this.tenantContext.getContext();
 
     const rows: any[] = await this.prisma.$queryRawUnsafe(
-      `SELECT id, role, name FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
+      `SELECT id, role, name, username FROM "${schemaName}".users WHERE id = $1::uuid LIMIT 1`,
       cashierId,
     );
 
@@ -329,9 +393,25 @@ export class ProfileService {
       throw new ForbiddenException('لا يمكن حذف حساب صاحب الصيدلية الأساسي');
     }
 
+    const targetUser = rows[0];
+
     await this.prisma.$executeRawUnsafe(
       `DELETE FROM "${schemaName}".users WHERE id = $1::uuid`,
       cashierId,
+    );
+
+    await this.auditLogService.log(
+      {
+        userId: ctx?.userId || null,
+        userName: 'صاحب الصيدلية',
+        userRole: 'OWNER',
+        action: AuditAction.USER_DELETE,
+        entityType: AuditEntityType.USER,
+        entityId: cashierId,
+        description: `حذف حساب الكاشير (${targetUser.name}) - @${targetUser.username}`,
+        details: { cashierId, username: targetUser.username, name: targetUser.name },
+      },
+      schemaName,
     );
 
     return {

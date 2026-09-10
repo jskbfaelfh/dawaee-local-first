@@ -20,6 +20,7 @@ import {
 import { SubscriptionGuard } from '../../common/guards/subscription.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @Controller('inventory')
 @UseGuards(AuthGuard('jwt'), SubscriptionGuard, RolesGuard)
@@ -39,8 +40,11 @@ export class InventoryController {
 
   @Post('batches/recall')
   @Roles('OWNER')
-  async setBatchRecall(@Body() body: { batchNumber: string; isRecalled: boolean }) {
-    return this.inventoryService.setBatchRecall(body.batchNumber, body.isRecalled);
+  async setBatchRecall(
+    @Body() body: { batchNumber: string; isRecalled: boolean },
+    @CurrentUser() user: any,
+  ) {
+    return this.inventoryService.setBatchRecall(body.batchNumber, body.isRecalled, user);
   }
 
   @Get('summary')
@@ -135,8 +139,9 @@ export class InventoryController {
   async returnBatchToSupplier(
     @Param('batchId') batchId: string,
     @Body() dto: any,
+    @CurrentUser() user: any,
   ) {
-    return this.inventoryService.returnBatchToSupplier(batchId, dto);
+    return this.inventoryService.returnBatchToSupplier(batchId, dto, user);
   }
 
   @Get('medicine-last-history/:medicineId')
@@ -160,8 +165,9 @@ export class InventoryController {
   async updateItemPrice(
     @Param('id') id: string,
     @Body() dto: UpdateItemPriceDto,
+    @CurrentUser() user: any,
   ) {
-    return this.inventoryService.updateItemPrice(id, dto);
+    return this.inventoryService.updateItemPrice(id, dto, user);
   }
 
   @Patch(':id/visibility')

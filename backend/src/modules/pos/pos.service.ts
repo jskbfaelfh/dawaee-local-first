@@ -11,6 +11,8 @@ import { PrismaService } from '../../database/prisma.service';
 import { TenantContextService } from '../../common/tenant/tenant-context.service';
 import { CheckoutDto, CreateReturnDto, SyncOfflineSalesDto, UnitTypeEnum, ItemConditionEnum } from './dto/create-sale.dto';
 import { validateAndSanitizeSchemaName } from '../../common/utils/security.util';
+import { AuditLogService } from '../audit/audit.service';
+import { AuditAction, AuditEntityType } from '../audit/dto/audit-log.dto';
 
 export interface ReturnAllocation {
   batchId: string;
@@ -31,6 +33,7 @@ export class PosService {
     private readonly prisma: PrismaService,
     private readonly tenantContext: TenantContextService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly auditLogService: AuditLogService,
   ) {}
 
   /**
@@ -944,6 +947,33 @@ export class PosService {
         `Returned item ${invItem.tradeName} marked as DAMAGED. Units quarantined and excluded from active sale stock.`,
       );
     }
+
+    // Record Enterprise Audit Log Entry
+    await this.auditLogService.log(
+      {
+        userId: userId || null,
+        userName: cashierName,
+        userRole: userRole || 'CASHIER',
+        action: AuditAction.PROCESS_RETURN,
+        entityType: AuditEntityType.RETURN,
+        entityId: returnId,
+        description: `استرجاع دواء: (${invItem.tradeName}) كمية: (${dto.quantity} ${isPack ? 'علبة' : 'شريط'}) بمبلغ (${refundAmount.toLocaleString()} د.ع) - السبب: ${dto.reason.trim()}`,
+        details: {
+          returnId,
+          saleId: dto.saleId || null,
+          inventoryItemId: dto.inventoryItemId,
+          tradeName: invItem.tradeName,
+          quantity: dto.quantity,
+          unitType: dto.unitType,
+          refundAmount,
+          itemCondition: condition,
+          paymentMethod,
+          reason: dto.reason.trim(),
+          batches: allocations.map((a) => ({ batchId: a.batchId, batchNumber: a.batchNumber, units: a.units })),
+        },
+      },
+      schemaName,
+    );
 
     const batchSummary = allocations
       .map((a) => `${a.batchNumber} (${isPack ? Math.round((a.units / unitsPerPack) * 100) / 100 : a.units} ${isPack ? 'علبة' : 'شريط'})`)
