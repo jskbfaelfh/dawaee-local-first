@@ -40,12 +40,11 @@ import {
   cacheInventoryLocally,
   searchLocalInventory,
   deductLocalInventoryStock,
-  getPendingSales,
   generateOfflineInvoiceNumber,
   type OfflineSaleRecord,
 } from '../utils/posOfflineDb';
 import { getLocalDailySummary, recordLocalSale } from '../utils/localDatabase';
-import { queueOutboxOperation, processOutboxQueue } from '../utils/outboxQueue';
+import { queueOutboxOperation, processOutboxQueue, getPendingOutboxOperations } from '../utils/outboxQueue';
 
 interface ActiveBatchInfo {
   id: string;
@@ -360,11 +359,12 @@ export const PosView: React.FC = () => {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Refresh pending offline sales counter
+  // Refresh pending offline sales counter from unified Outbox
   const refreshPendingCount = async () => {
     try {
-      const pending = await getPendingSales();
-      setPendingSalesCount(pending.length);
+      const pendingOps = await getPendingOutboxOperations();
+      const pendingSalesOps = pendingOps.filter((o) => o.type === 'SALE');
+      setPendingSalesCount(pendingSalesOps.length);
     } catch (e) {
       console.error('Failed to get pending sales', e);
     }

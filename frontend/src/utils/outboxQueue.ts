@@ -153,6 +153,17 @@ export async function processOutboxQueue(): Promise<{ syncedCount: number; faile
       });
 
       await removeOutboxOperation(op.id);
+
+      // Clean up pending_sales store in IndexedDB if op was a SALE
+      if (op.type === 'SALE' && op.payload?.sales && Array.isArray(op.payload.sales)) {
+        const { removePendingSale } = await import('./localDatabase');
+        for (const sItem of op.payload.sales) {
+          if (sItem.offlineId) {
+            await removePendingSale(sItem.offlineId).catch(() => {});
+          }
+        }
+      }
+
       syncedCount++;
     } catch (err: any) {
       console.warn(`Outbox operation ${op.id} (${op.type}) sync failed:`, err);
