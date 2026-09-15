@@ -220,26 +220,41 @@ export function getOrGenerateDevJwtSecret(): string {
 }
 
 /**
- * Validate essential security environment variables on startup
+ * Validate essential security environment variables on startup.
+ * Strictly aborts server execution (process.exit(1)) in production if insecure defaults or missing secrets are detected.
  */
 export function validateStartupSecurity() {
   const jwtSecret = process.env.JWT_SECRET;
   const adminPass = process.env.ADMIN_PASSWORD;
   const adminUser = process.env.ADMIN_USERNAME;
+  const encryptionKey = process.env.ENCRYPTION_KEY;
+  const isProd = process.env.NODE_ENV === 'production';
 
   const INSECURE_DEFAULT_JWT = 'dawaee-jwt-dev-secret-key-2026';
   const INSECURE_DEFAULT_ADMIN = 'Admin@Dawaee2026';
 
-  if (!jwtSecret || jwtSecret === INSECURE_DEFAULT_JWT) {
-    logger.warn('⚠️ SECURITY WARNING: Using default or missing JWT_SECRET. Set a strong custom secret in environment variables.');
+  const errors: string[] = [];
+
+  if (!jwtSecret || jwtSecret === INSECURE_DEFAULT_JWT || jwtSecret.length < 32) {
+    errors.push('JWT_SECRET مفقود أو غير آمن (يجب أن لا يقل عن 32 حرفاً وألا يكون القيمة الافتراضية للتطوير).');
   }
 
   if (!adminPass || adminPass === INSECURE_DEFAULT_ADMIN) {
-    logger.warn('⚠️ SECURITY WARNING: Default or missing ADMIN_PASSWORD. Set a strong secret in production environment variables.');
+    errors.push('ADMIN_PASSWORD مفقود أو يعتمد كلمة المرور الافتراضية الضعيفة (Admin@Dawaee2026).');
   }
 
-  if (!process.env.ENCRYPTION_KEY) {
-    logger.warn('⚠️ SECURITY WARNING: Missing ENCRYPTION_KEY. Set ENCRYPTION_KEY in environment variables for persistent secrets.');
+  if (!encryptionKey || encryptionKey.length < 16) {
+    errors.push('ENCRYPTION_KEY مفقود أو قصير جداً (مطلوب لتشفير مفاتيح وأسرار النظام).');
+  }
+
+  if (errors.length > 0) {
+    if (isProd) {
+      logger.error('❌ CRITICAL SECURITY ERROR: Stopping server startup in production mode due to unsafe security configurations:');
+      errors.forEach((err) => logger.error(`   - ${err}`));
+      process.exit(1);
+    } else {
+      errors.forEach((err) => logger.warn(`⚠️ SECURITY NOTICE (Local Dev Mode): ${err}`));
+    }
   }
 
   if (!adminUser || adminUser === 'superadmin') {
