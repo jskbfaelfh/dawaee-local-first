@@ -42,6 +42,8 @@ import { ChainManagementView } from './views/ChainManagementView';
 import { AuditLogsView } from './views/AuditLogsView';
 import { LoginView } from './views/LoginView';
 import { ProactiveAlertsModal } from './components/ProactiveAlertsModal';
+import { processOutboxQueue } from './utils/outboxQueue';
+import { syncMasterMedicinesDelta } from './utils/localDatabase';
 import {
   getAuthToken,
   setAuthToken,
@@ -163,6 +165,8 @@ export const App: React.FC = () => {
   const [expiringAlerts, setExpiringAlerts] = useState<any[]>([]);
   const [lowStockAlerts, setLowStockAlerts] = useState<any[]>([]);
   const [showAlertModal, setShowAlertModal] = useState<boolean>(false);
+  const [outboxCount, setOutboxCount] = useState<number>(0);
+  const [isManualSyncing, setIsManualSyncing] = useState<boolean>(false);
 
   // Close drawer on Escape key press
   useEffect(() => {
@@ -194,6 +198,57 @@ export const App: React.FC = () => {
       }
     }
   }, [currentUser]);
+
+  // Outbox background sync worker & Delta sync for Master Catalog
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const refreshOutboxCount = async () => {
+      try {
+        const { getPendingOutboxOperations } = await import('./utils/outboxQueue');
+        const pending = await getPendingOutboxOperations();
+        setOutboxCount(pending.length);
+      } catch (e) {}
+    };
+
+    const runSync = async () => {
+      await refreshOutboxCount();
+      if (navigator.onLine) {
+        await processOutboxQueue().catch(() => {});
+        await syncMasterMedicinesDelta().catch(() => {});
+        await refreshOutboxCount();
+      }
+    };
+
+    runSync();
+    const interval = setInterval(runSync, 10000);
+
+    const handleOnline = () => runSync();
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [currentUser]);
+
+  const handleManualOutboxSync = async () => {
+    if (isManualSyncing || !navigator.onLine) return;
+    setIsManualSyncing(true);
+    try {
+      const res = await processOutboxQueue();
+      const { getPendingOutboxOperations } = await import('./utils/outboxQueue');
+      const pending = await getPendingOutboxOperations();
+      setOutboxCount(pending.length);
+      if (res.syncedCount > 0) {
+        alert(`تمت مزامنة (${res.syncedCount}) عمليات محلياً بنجاح مع السحابة! 📡✅`);
+      }
+    } catch (e) {
+      console.warn('Manual sync failed:', e);
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
 
   const handleLoginSuccess = (user: any, pharmacy?: any, branchList?: any[]) => {
     setCurrentUser(user);
@@ -614,6 +669,21 @@ export const App: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+            {/* Outbox Pending Operations Live Sync Badge */}
+            {outboxCount > 0 && (
+              <button
+                type="button"
+                onClick={handleManualOutboxSync}
+                disabled={isManualSyncing || !navigator.onLine}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-black transition-all cursor-pointer shadow-2xs active:scale-95 animate-pulse"
+                title="اضغط لمزامنة العمليات المعلقة مع السيرفر عند توفر الإنترنت"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-amber-700 ${isManualSyncing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">مزامنة معلقة</span>
+                <span>({outboxCount})</span>
+              </button>
+            )}
+
             {/* Branch Switcher Dropdown (For Owner with multiple branches or chain) */}
             {currentUser?.role === 'OWNER' && (
               <div className="relative">

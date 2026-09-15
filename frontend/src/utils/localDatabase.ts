@@ -5,9 +5,22 @@
  */
 
 const DB_NAME = 'dawaee_local_master_db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+
+export interface LocalMasterMedicine {
+  id: string;
+  tradeName: string;
+  scientificName?: string;
+  dosageForm?: string;
+  strength?: string;
+  manufacturer?: string;
+  barcode?: string;
+  defaultUnitsPerPack?: number;
+  updatedAt?: string;
+}
 
 export interface LocalInventoryItem {
+
   id: string;
   medicineId: string;
   customName?: string;
@@ -46,6 +59,7 @@ export interface LocalSaleRecord {
   totalAmount: number;
   createdAt: string;
   cashierName?: string;
+  customerName?: string;
   isSynced: boolean;
 }
 
@@ -77,6 +91,18 @@ export function getLocalMasterDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('sales_history')) {
         const salesStore = db.createObjectStore('sales_history', { keyPath: 'offlineId' });
         salesStore.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('outbox_operations')) {
+        const outboxStore = db.createObjectStore('outbox_operations', { keyPath: 'id' });
+        outboxStore.createIndex('status', 'status', { unique: false });
+        outboxStore.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('master_medicines')) {
+        const medStore = db.createObjectStore('master_medicines', { keyPath: 'id' });
+        medStore.createIndex('tradeName', 'tradeName', { unique: false });
+        medStore.createIndex('barcode', 'barcode', { unique: false });
       }
     };
 
@@ -348,3 +374,80 @@ export async function getLocalDailySummary(): Promise<any> {
     req.onerror = () => reject(req.error);
   });
 }
+
+/**
+ * Bulk save / update Master Medicines in local IndexedDB
+ */
+export async function saveMasterMedicinesBulk(medicines: LocalMasterMedicine[]): Promise<void> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('master_medicines', 'readwrite');
+    const store = tx.objectStore('master_medicines');
+    for (const med of medicines) {
+      store.put(med);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Search local Master Medicines catalog offline
+ */
+export async function searchLocalMasterMedicines(searchTerm: string): Promise<LocalMasterMedicine[]> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('master_medicines', 'readonly');
+    const store = tx.objectStore('master_medicines');
+    const req = store.getAll();
+
+    req.onsuccess = () => {
+      const all: LocalMasterMedicine[] = req.result || [];
+      if (!searchTerm || !searchTerm.trim()) {
+        resolve(all.slice(0, 30));
+        return;
+      }
+      const term = searchTerm.trim().toLowerCase();
+      const filtered = all.filter((med) => {
+        const tName = (med.tradeName || '').toLowerCase();
+        const sName = (med.scientificName || '').toLowerCase();
+        const bCode = (med.barcode || '').toLowerCase();
+        return tName.includes(term) || sName.includes(term) || bCode.includes(term);
+      });
+      resolve(filtered.slice(0, 40));
+    };
+
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Sync Master Medicines using Delta Sync (only modified items since last sync)
+ */
+export async function syncMasterMedicinesDelta(): Promise<{ totalCount: number; updatedCount: number }> {
+  if (!navigator.onLine) return { totalCount: 0, updatedCount: 0 };
+
+  const lastSync = localStorage.getItem('dawaee_last_medicines_sync');
+  try {
+    const endpoint = lastSync
+      ? `/medicines/search?updatedSince=${encodeURIComponent(lastSync)}`
+      : '/medicines/search?q=a'; // initial fetch fallback if full list endpoint
+
+    const { apiRequest } = await import('../api/client');
+    const updatedMeds = await apiRequest<LocalMasterMedicine[]>(endpoint).catch(() => []);
+
+    if (Array.isArray(updatedMeds)) {
+      if (updatedMeds.length > 0) {
+        await saveMasterMedicinesBulk(updatedMeds);
+      }
+      localStorage.setItem('dawaee_last_medicines_sync', new Date().toISOString());
+      return { totalCount: updatedMeds.length, updatedCount: updatedMeds.length };
+    }
+
+    return { totalCount: 0, updatedCount: 0 };
+  } catch (err) {
+    console.warn('Delta sync master medicines error:', err);
+    return { totalCount: 0, updatedCount: 0 };
+  }
+}
+

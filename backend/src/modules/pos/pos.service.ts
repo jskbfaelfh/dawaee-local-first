@@ -46,6 +46,7 @@ export class PosService {
         DO $$ 
         BEGIN
           ALTER TABLE "${schemaName}".sales ADD COLUMN IF NOT EXISTS offline_id VARCHAR(100);
+          ALTER TABLE "${schemaName}".sales ADD COLUMN IF NOT EXISTS customer_name VARCHAR(150);
           CREATE UNIQUE INDEX IF NOT EXISTS "idx_${schemaName}_sales_offline_id" 
             ON "${schemaName}".sales (offline_id) WHERE offline_id IS NOT NULL;
           ALTER TABLE "${schemaName}".sale_items ALTER COLUMN quantity TYPE DECIMAL(12, 2);
@@ -368,11 +369,11 @@ export class PosService {
             const discountAmount = Math.min(Number(dto.discountAmount || 0), subtotal);
             const totalAmount = Math.max(0, subtotal - discountAmount);
 
-            // D. Insert sales record using parameterized query with offline_id
+            // D. Insert sales record using parameterized query with offline_id and customer_name
             await tx.$executeRawUnsafe(
               `INSERT INTO "${schemaName}".sales 
-               (id, invoice_number, user_id, subtotal, discount_amount, total_amount, offline_id, created_at) 
-               VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, NOW())`,
+               (id, invoice_number, user_id, subtotal, discount_amount, total_amount, offline_id, customer_name, created_at) 
+               VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, NOW())`,
               saleId,
               invoiceNumber,
               userId || null,
@@ -380,6 +381,7 @@ export class PosService {
               discountAmount,
               totalAmount,
               dto.offlineId ? dto.offlineId.trim() : null,
+              dto.customerName ? dto.customerName.trim() : null,
             );
 
             // E. Insert all sale_items with snapshotted cost values
@@ -1050,6 +1052,7 @@ export class PosService {
          s.subtotal,
          s.discount_amount as "discountAmount",
          s.total_amount as "totalAmount",
+         s.customer_name as "customerName",
          s.created_at as "createdAt",
          u.name as "cashierName"
        FROM "${schemaName}".sales s
@@ -1072,12 +1075,12 @@ export class PosService {
          si.unit_price as "unitPrice",
          si.total_price as "totalPrice",
          b.batch_number as "batchNumber",
-         m.trade_name as "tradeName",
+         COALESCE(i.custom_name, m.trade_name, 'دواء') as "tradeName",
          m.scientific_name as "scientificName",
          m.dosage_form as "dosageForm"
        FROM "${schemaName}".sale_items si
        JOIN "${schemaName}".inventory_items i ON si.inventory_item_id = i.id
-       JOIN public.medicines m ON i.medicine_id = m.id
+       LEFT JOIN public.medicines m ON i.medicine_id = m.id
        LEFT JOIN "${schemaName}".inventory_batches b ON si.inventory_batch_id = b.id
        WHERE si.sale_id = $1::uuid`,
       saleId,
@@ -1143,7 +1146,7 @@ export class PosService {
 
     if (query?.search && query.search.trim().length > 0) {
       params.push(`%${query.search.trim()}%`);
-      searchFilter = `AND (s.invoice_number ILIKE $2 OR u.name ILIKE $2)`;
+      searchFilter = `AND (s.invoice_number ILIKE $2 OR s.customer_name ILIKE $2 OR u.name ILIKE $2)`;
     }
 
     const sql = `
@@ -1153,9 +1156,28 @@ export class PosService {
         s.subtotal,
         s.discount_amount as "discountAmount",
         s.total_amount as "totalAmount",
+        s.customer_name as "customerName",
         s.created_at as "createdAt",
         u.name as "cashierName",
-        (SELECT COUNT(id)::int FROM "${schemaName}".sale_items WHERE sale_id = s.id) as "itemsCount"
+        (SELECT COUNT(id)::int FROM "${schemaName}".sale_items WHERE sale_id = s.id) as "itemsCount",
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'tradeName', COALESCE(i.custom_name, m.trade_name, 'دواء'),
+                'unitType', si.unit_type,
+                'quantity', si.quantity,
+                'unitPrice', si.unit_price,
+                'totalPrice', si.total_price
+              ) ORDER BY si.unit_price DESC
+            )
+            FROM "${schemaName}".sale_items si
+            JOIN "${schemaName}".inventory_items i ON si.inventory_item_id = i.id
+            LEFT JOIN public.medicines m ON i.medicine_id = m.id
+            WHERE si.sale_id = s.id
+          ),
+          '[]'::json
+        ) as "items"
       FROM "${schemaName}".sales s
       LEFT JOIN "${schemaName}".users u ON s.user_id = u.id
       WHERE 1=1 ${searchFilter}

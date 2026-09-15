@@ -27,6 +27,10 @@ import {
   CreditCard,
   Wallet,
   History,
+  FileText,
+  UserCheck,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { apiRequest } from '../api/client';
 import { roundTo250, calculateStripPrice } from '../utils/currency';
@@ -68,6 +72,7 @@ interface SearchMedicine {
   availablePacks: number;
   availableStrips: number;
   totalUnitsRemaining: number;
+  validUnitsRemaining?: number;
   barcode?: string;
   dosageForm?: string;
   strength?: string;
@@ -281,6 +286,57 @@ export const PosView: React.FC = () => {
   const [loadingRecentReturns, setLoadingRecentReturns] = useState(false);
   const returnSearchInputRef = useRef<HTMLInputElement>(null);
 
+  // Customer Name & Sales Ledger History State
+  const [customerName, setCustomerName] = useState('');
+  const [showSalesHistoryModal, setShowSalesHistoryModal] = useState(false);
+  const [salesHistory, setSalesHistory] = useState<any[]>([]);
+  const [loadingSalesHistory, setLoadingSalesHistory] = useState(false);
+  const [salesHistorySearch, setSalesHistorySearch] = useState('');
+  const [collapsedInvoices, setCollapsedInvoices] = useState<Record<string, boolean>>({});
+
+
+  const fetchSalesHistory = async (searchQuery?: string) => {
+    setLoadingSalesHistory(true);
+    const q = searchQuery !== undefined ? searchQuery : salesHistorySearch;
+    if (navigator.onLine) {
+      try {
+        const endpoint = `/pos/sales?limit=50${q.trim() ? `&search=${encodeURIComponent(q.trim())}` : ''}`;
+        const data = await apiRequest<any[]>(endpoint);
+        setSalesHistory(Array.isArray(data) ? data : []);
+        setLoadingSalesHistory(false);
+        return;
+      } catch (err) {
+        console.warn('Online sales history fetch failed, reading local database:', err);
+      }
+    }
+    try {
+      const { getLocalMasterDb } = await import('../utils/localDatabase');
+      const db = await getLocalMasterDb();
+      const tx = db.transaction('sales_history', 'readonly');
+      const store = tx.objectStore('sales_history');
+      const req = store.getAll();
+      req.onsuccess = () => {
+        let all: any[] = req.result || [];
+        if (q.trim()) {
+          const term = q.trim().toLowerCase();
+          all = all.filter(
+            (s) =>
+              (s.invoiceNumber || '').toLowerCase().includes(term) ||
+              (s.customerName || '').toLowerCase().includes(term) ||
+              (s.cashierName || '').toLowerCase().includes(term),
+          );
+        }
+        all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setSalesHistory(all);
+        setLoadingSalesHistory(false);
+      };
+      req.onerror = () => setLoadingSalesHistory(false);
+    } catch (e) {
+      console.error('Local sales history error:', e);
+      setLoadingSalesHistory(false);
+    }
+  };
+
   // Smart Search & Voice AI state
   const [showSmartSearch, setShowSmartSearch] = useState(false);
   const [smartSearchAutoVoice, setSmartSearchAutoVoice] = useState(false);
@@ -398,7 +454,7 @@ export const PosView: React.FC = () => {
     };
   }, []);
 
-  // Search medicines (Online with seamless Offline fallback)
+  // Search medicines (Online with seamless Offline fallback) — Strictly available items only
   useEffect(() => {
     if (searchTerm.trim().length === 0) {
       setSearchResults([]);
@@ -408,8 +464,14 @@ export const PosView: React.FC = () => {
     const timer = setTimeout(async () => {
       if (navigator.onLine) {
         try {
-          const data = await apiRequest<SearchMedicine[]>(`/inventory?search=${encodeURIComponent(searchTerm)}`);
-          setSearchResults(Array.isArray(data) ? data : []);
+          const data = await apiRequest<SearchMedicine[]>(`/inventory?availableOnly=true&search=${encodeURIComponent(searchTerm)}`);
+          const available = (Array.isArray(data) ? data : []).filter((med) => {
+            const units = Number(med.validUnitsRemaining ?? med.totalUnitsRemaining ?? 0);
+            const pks = Number(med.availablePacks ?? 0);
+            const strs = Number(med.availableStrips ?? 0);
+            return units > 0 || pks > 0 || strs > 0;
+          });
+          setSearchResults(available);
           return;
         } catch (err) {
           console.warn('Online search failed, falling back to local IndexedDB', err);
@@ -419,7 +481,13 @@ export const PosView: React.FC = () => {
       // Offline search fallback
       try {
         const localData = await searchLocalInventory(searchTerm);
-        setSearchResults(localData);
+        const available = (Array.isArray(localData) ? localData : []).filter((med) => {
+          const units = Number(med.validUnitsRemaining ?? med.totalUnitsRemaining ?? 0);
+          const pks = Number(med.availablePacks ?? 0);
+          const strs = Number(med.availableStrips ?? 0);
+          return units > 0 || pks > 0 || strs > 0;
+        });
+        setSearchResults(available);
       } catch (err) {
         console.error('Offline search error:', err);
       }
@@ -600,6 +668,7 @@ export const PosView: React.FC = () => {
 
     const payload = {
       discountAmount: Number(discountAmount || 0),
+      customerName: customerName.trim() || undefined,
       items: cart.map((item) => ({
         inventoryItemId: item.inventoryItemId,
         inventoryBatchId: item.inventoryBatchId,
@@ -620,6 +689,7 @@ export const PosView: React.FC = () => {
         setCart([]);
         setDiscountAmount(0);
         setDiscountPercent('');
+        setCustomerName('');
         setMessage({ type: 'success', text: `تم إتمام عملية البيع بنجاح! رقم الفاتورة: ${result.invoiceNumber}` });
         setLoading(false);
         searchInputRef.current?.focus();
@@ -695,6 +765,7 @@ export const PosView: React.FC = () => {
         totalAmount: total,
         createdAt: new Date().toISOString(),
         cashierName: 'كاشير (محلي)',
+        customerName: customerName.trim() || undefined,
       };
 
       // 1. Save to local IndexedDB pending queue
@@ -713,12 +784,14 @@ export const PosView: React.FC = () => {
         totalAmount: total,
         createdAt: offlineRecord.createdAt,
         cashierName: 'كاشير (محلي)',
+        customerName: customerName.trim() || undefined,
         isOffline: true,
       });
 
       setCart([]);
       setDiscountAmount(0);
       setDiscountPercent('');
+      setCustomerName('');
       await refreshPendingCount();
 
       setMessage({
@@ -835,16 +908,62 @@ export const PosView: React.FC = () => {
         notes: returnNotes.trim() || undefined,
       };
 
-      const res = await apiRequest<any>('/pos/return', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      if (isOnline && navigator.onLine) {
+        try {
+          const res = await apiRequest<any>('/pos/return', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
 
-      // Set completed return receipt for on-screen modal & printing
-      setCompletedReturnReceipt(res);
+          setCompletedReturnReceipt(res);
+          setShowReturnModal(false);
+          setSelectedReturnMed(null);
+          setReturnSearchTerm('');
+          setReturnQty(1);
+          setReturnRefundAmount('');
+          setIsManualRefundAmount(false);
+          setReturnNotes('');
+
+          await fetchShiftSummary();
+          setShowShiftSummary(false);
+
+          setMessage({
+            type: 'success',
+            text: res.message || 'تم إتمام عملية الإرجاع بنجاح!',
+          });
+          return;
+        } catch (err: any) {
+          if (err?.status && err.status >= 400 && err.status < 500) {
+            alert(err.message || 'فشل إتمام عملية الإرجاع');
+            setReturnSubmitting(false);
+            return;
+          }
+          console.warn('Online return failed, falling back to offline outbox queue:', err);
+        }
+      }
+
+      // Offline Return Fallback Queue
+      const { queueOutboxOperation } = await import('../utils/outboxQueue');
+      await queueOutboxOperation('RETURN', '/pos/return', payload);
+
+      const localReturnReceipt = {
+        id: `local-ret-${Date.now()}`,
+        returnId: `local-ret-${Date.now()}`,
+        tradeName: selectedReturnMed.customName || selectedReturnMed.tradeName,
+        scientificName: selectedReturnMed.scientificName,
+        unitType: returnUnitType,
+        quantity: numQty,
+        refundAmount: Number(returnRefundAmount || 0),
+        reason: returnReason.trim() || 'إرجاع سريع',
+        itemCondition: returnCondition,
+        paymentMethod: returnPaymentMethod,
+        notes: returnNotes.trim() || undefined,
+        createdAt: new Date().toISOString(),
+        isPendingSync: true,
+      };
+
+      setCompletedReturnReceipt(localReturnReceipt);
       setShowReturnModal(false);
-
-      // Reset form
       setSelectedReturnMed(null);
       setReturnSearchTerm('');
       setReturnQty(1);
@@ -852,16 +971,12 @@ export const PosView: React.FC = () => {
       setIsManualRefundAmount(false);
       setReturnNotes('');
 
-      // Refresh daily summary so cashier drawer net cash updates immediately
-      await fetchShiftSummary();
-      setShowShiftSummary(false);
-
       setMessage({
         type: 'success',
-        text: res.message || 'تم إتمام عملية الإرجاع بنجاح!',
+        text: 'تم تسجيل عملية الإرجاع محلياً! وسيتم مزامنتها تلقائياً عند توفر الإنترنت 📡',
       });
     } catch (err: any) {
-      alert(err.message || 'فشل إتمام عملية الإرجاع');
+      alert(err.message || 'فشل إتمام عملية الإرجاع محلياً');
     } finally {
       setReturnSubmitting(false);
     }
@@ -943,6 +1058,18 @@ export const PosView: React.FC = () => {
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             <span className="hidden md:inline">{isFullscreen ? 'تصغير' : 'ملء الشاشة'}</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setShowSalesHistoryModal(true);
+              fetchSalesHistory();
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-black text-indigo-900 bg-indigo-50 hover:bg-indigo-100 rounded-xl border border-indigo-200 transition-all cursor-pointer active:scale-95 shadow-2xs"
+            title="استعراض والبحث في جميع الفواتير السابقة والزبائن"
+          >
+            <FileText className="w-4 h-4 text-indigo-600" />
+            <span>سجل الفواتير 📄</span>
           </button>
 
           <button
@@ -1312,6 +1439,18 @@ export const PosView: React.FC = () => {
                   className="w-28 h-10 px-3 bg-white border-2 border-slate-300 rounded-xl text-left text-sm font-black text-rose-600 focus:outline-hidden focus:border-emerald-500 font-mono"
                 />
               </div>
+            </div>
+
+            {/* Customer Name Input (Optional) */}
+            <div className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
+              <UserCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+              <input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                placeholder="اسم المشتري / العميل (اختياري)..."
+                className="w-full text-xs sm:text-sm font-bold text-slate-800 focus:outline-hidden bg-transparent"
+              />
             </div>
 
             {/* Total */}
@@ -2590,6 +2729,272 @@ export const PosView: React.FC = () => {
               >
                 إغلاق
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sales History & Invoices Archive Modal */}
+      {showSalesHistoryModal && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 z-50 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-4xl w-full shadow-2xl border border-slate-200 flex flex-col max-h-[92vh] overflow-hidden">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 sm:p-5 border-b border-slate-100 shrink-0 bg-slate-50/50">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-indigo-100 text-indigo-700 flex items-center justify-center shadow-xs">
+                  <FileText className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-slate-900 flex items-center gap-2">
+                    <span>سجل الفواتير وأرشيف المبيعات</span>
+                    <span className="text-[11px] px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-800 font-bold border border-indigo-200">
+                      {salesHistory.length} فاتورة
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    استعراض الفواتير الصادرة، أسماء الزبائن، تفاصيل الأدوية، وحالة المزامنة
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  setShowSalesHistoryModal(false);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-2 rounded-xl hover:bg-slate-100 cursor-pointer transition-all"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Search Bar */}
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center gap-3 shrink-0">
+              <div className="relative flex-1">
+                <Search className="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input
+                  type="text"
+                  value={salesHistorySearch}
+                  onChange={(e) => {
+                    setSalesHistorySearch(e.target.value);
+                    fetchSalesHistory(e.target.value);
+                  }}
+                  placeholder="ابحث برقم الفاتورة، اسم الزبون، أو الكاشير..."
+                  className="w-full pr-10 pl-4 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-hidden focus:border-indigo-500 shadow-2xs"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => fetchSalesHistory()}
+                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95 transition-all"
+              >
+                <RefreshCw className={`w-4 h-4 ${loadingSalesHistory ? 'animate-spin' : ''}`} />
+                <span>تحديث السجل</span>
+              </button>
+            </div>
+
+            {/* Sales List Table */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {loadingSalesHistory ? (
+                <div className="py-16 text-center text-xs font-bold text-slate-500 flex flex-col items-center gap-2">
+                  <RefreshCw className="w-6 h-6 animate-spin text-indigo-600" />
+                  <span>جاري تحميل سجل الفواتير...</span>
+                </div>
+              ) : salesHistory.length === 0 ? (
+                <div className="py-16 text-center text-slate-400 font-bold text-xs">
+                  لا توجد فواتير مبيعات مطابقة للبحث
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {salesHistory.map((s) => {
+                    const saleKey = s.id || s.offlineId || s.invoiceNumber;
+                    const isCollapsed = !!collapsedInvoices[saleKey];
+                    const itemsList = Array.isArray(s.items) ? s.items : [];
+
+                    return (
+                      <div
+                        key={saleKey}
+                        className="p-4 bg-white hover:bg-slate-50/50 rounded-2xl border border-slate-200 transition-all shadow-xs flex flex-col gap-3 text-xs"
+                      >
+                        {/* Header Row: Invoice summary, customer, amounts, actions */}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-mono font-black text-slate-900 text-sm">{s.invoiceNumber}</span>
+                              {s.customerName ? (
+                                <span className="text-xs px-2.5 py-0.5 bg-indigo-50 text-indigo-900 rounded-lg font-black border border-indigo-200 flex items-center gap-1">
+                                  <UserCheck className="w-3 h-3 text-indigo-600" />
+                                  <span>الزبون: {s.customerName}</span>
+                                </span>
+                              ) : (
+                                <span className="text-[10px] px-2 py-0.5 bg-slate-100 text-slate-500 rounded-lg font-bold">
+                                  زبون عام
+                                </span>
+                              )}
+
+                              {s.isSynced === false || s.isOffline ? (
+                                <span className="text-[10px] px-2 py-0.5 bg-amber-100 text-amber-900 rounded-md font-bold">
+                                  أوفلاين 📡
+                                </span>
+                              ) : (
+                                <span className="text-[10px] px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md font-bold">
+                                  متزامن مع السحابة ✅
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-[11px] text-slate-500 flex items-center gap-3 font-medium">
+                              <span>الكاشير: {s.cashierName || 'الكاشير'}</span>
+                              <span>•</span>
+                              <span>{new Date(s.createdAt).toLocaleString('ar-IQ')}</span>
+                              <span>•</span>
+                              <span className="font-bold text-slate-700">
+                                {s.itemsCount || itemsList.length} مواد
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2.5">
+                            <div className="text-left">
+                              <div className="font-mono font-black text-emerald-700 text-base">
+                                {Number(s.totalAmount || 0).toLocaleString()} د.ع
+                              </div>
+                              {Number(s.discountAmount || 0) > 0 && (
+                                <div className="text-[10px] font-bold text-rose-600 font-mono text-left">
+                                  خصم: -{Number(s.discountAmount).toLocaleString()} د.ع
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Toggle Items Button */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCollapsedInvoices((prev) => ({
+                                  ...prev,
+                                  [saleKey]: !prev[saleKey],
+                                }));
+                              }}
+                              className="px-2.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer transition-all"
+                              title={isCollapsed ? 'عرض المواد' : 'إخفاء المواد'}
+                            >
+                              {isCollapsed ? (
+                                <>
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                  <span>عرض المواد</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                  <span>إخفاء المواد</span>
+                                </>
+                              )}
+                            </button>
+
+                            {/* Print Receipt Button */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCompletedSale(s);
+                                setShowSalesHistoryModal(false);
+                              }}
+                              className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95 transition-all"
+                              title="عرض الوصل وإعادة الطباعة الحرارية"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>الوصل 🖨️</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Items Sub-Table (Expanded by Default) */}
+                        {!isCollapsed && (
+                          <div className="mt-1 pt-2.5 border-t border-slate-100">
+                            {itemsList.length > 0 ? (
+                              <div className="overflow-x-auto rounded-xl border border-slate-200/90 bg-slate-50/50">
+                                <table className="w-full text-right text-xs">
+                                  <thead className="bg-slate-100 text-slate-600 font-bold border-b border-slate-200 text-[11px]">
+                                    <tr>
+                                      <th className="py-2 px-3">اسم المادة / الدواء</th>
+                                      <th className="py-2 px-3 text-center">الكمية</th>
+                                      <th className="py-2 px-3 text-center">الوحدة</th>
+                                      <th className="py-2 px-3 text-left">سعر المفرد</th>
+                                      <th className="py-2 px-3 text-left">المجموع</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-200/60 font-medium">
+                                    {itemsList.map((item: any, idx: number) => {
+                                      const lineTotal = Number(
+                                        item.totalPrice !== undefined
+                                          ? item.totalPrice
+                                          : Number(item.unitPrice || 0) * Number(item.quantity || 1),
+                                      );
+                                      return (
+                                        <tr key={item.id || idx} className="hover:bg-indigo-50/30 transition-colors">
+                                          <td className="py-2 px-3 font-bold text-slate-800">
+                                            <div className="flex items-center gap-1.5">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0"></span>
+                                              <span>{item.tradeName || item.customName || 'دواء'}</span>
+                                            </div>
+                                          </td>
+                                          <td className="py-2 px-3 text-center font-mono font-black text-indigo-700">
+                                            {item.quantity}
+                                          </td>
+                                          <td className="py-2 px-3 text-center">
+                                            <span className="text-[10px] px-2 py-0.5 rounded-md font-bold bg-slate-200 text-slate-700">
+                                              {item.unitType === 'PACK'
+                                                ? 'علبة'
+                                                : item.unitType === 'STRIP'
+                                                ? 'شريط'
+                                                : item.unitType || 'وحدة'}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-3 text-left font-mono text-slate-600">
+                                            {Number(item.unitPrice || 0).toLocaleString()} د.ع
+                                          </td>
+                                          <td className="py-2 px-3 text-left font-mono font-black text-emerald-800">
+                                            {lineTotal.toLocaleString()} د.ع
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : s.id ? (
+                              <div className="py-2 text-center text-[11px] text-slate-400 flex items-center justify-center gap-2">
+                                <span>لم يتم تحميل تفاصيل المواد</span>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      const details = await apiRequest<any>(`/pos/sales/${s.id}`);
+                                      if (details?.items) {
+                                        setSalesHistory((prev) =>
+                                          prev.map((row) => (row.id === s.id ? { ...row, items: details.items } : row)),
+                                        );
+                                      }
+                                    } catch (e) {
+                                      console.error(e);
+                                    }
+                                  }}
+                                  className="text-indigo-600 font-bold hover:underline cursor-pointer"
+                                >
+                                  (اضغط لتحميل المواد)
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="py-1 text-center text-[11px] text-slate-400">
+                                لا توجد تفاصيل مواد لهذه الفاتورة
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>

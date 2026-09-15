@@ -850,7 +850,7 @@ export class InventoryService {
   /**
    * Get all pharmacy inventory items with master info, custom alias name, and calculated stock
    */
-  async getPharmacyInventory(query?: { search?: string; supplierId?: string; shelfLocation?: string }) {
+  async getPharmacyInventory(query?: { search?: string; supplierId?: string; shelfLocation?: string; availableOnly?: string }) {
     const schemaName = this.tenantContext.getSchemaName();
     await this.ensurePurchaseTablesExist(schemaName);
 
@@ -871,6 +871,11 @@ export class InventoryService {
       params.push(query.supplierId.trim());
       searchFilter += ` AND EXISTS (SELECT 1 FROM "${schemaName}".inventory_batches b_sub WHERE b_sub.inventory_item_id = i.id AND b_sub.supplier_id = $${params.length}::uuid AND b_sub.quantity_units_remaining > 0)`;
     }
+
+    const isAvailableOnly = query?.availableOnly === 'true' || query?.availableOnly === '1';
+    const havingClause = isAvailableOnly
+      ? `HAVING COALESCE(SUM(CASE WHEN b.expiry_date >= CURRENT_DATE AND (b.is_recalled IS FALSE OR b.is_recalled IS NULL) THEN b.quantity_units_remaining ELSE 0 END), 0) > 0`
+      : '';
 
     const sql = `
       SELECT 
@@ -941,6 +946,7 @@ export class InventoryService {
       LEFT JOIN "${schemaName}".inventory_batches b ON i.id = b.inventory_item_id AND b.quantity_units_remaining > 0
       WHERE 1=1 ${searchFilter}
       GROUP BY i.id, m.id, m.trade_name, m.scientific_name, m.dosage_form, m.strength, m.manufacturer, m.barcode
+      ${havingClause}
       ORDER BY COALESCE(i.custom_name, m.trade_name, '') ASC;
     `;
 

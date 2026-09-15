@@ -20,6 +20,7 @@ export interface OfflineSaleRecord {
   invoiceNumber: string;
   payload: {
     discountAmount: number;
+    customerName?: string;
     items: {
       inventoryItemId: string;
       inventoryBatchId?: string;
@@ -34,6 +35,7 @@ export interface OfflineSaleRecord {
   totalAmount: number;
   createdAt: string;
   cashierName?: string;
+  customerName?: string;
 }
 
 let dbInstance: IDBDatabase | null = null;
@@ -102,13 +104,20 @@ export async function searchLocalInventory(searchTerm: string): Promise<any[]> {
 
     req.onsuccess = () => {
       const allItems: any[] = req.result || [];
+      const availableItems = allItems.filter((item) => {
+        const units = Number(item.validUnitsRemaining ?? item.totalUnitsRemaining ?? 0);
+        const pks = Number(item.availablePacks ?? 0);
+        const strs = Number(item.availableStrips ?? 0);
+        return units > 0 || pks > 0 || strs > 0;
+      });
+
       if (!searchTerm || searchTerm.trim().length === 0) {
-        resolve(allItems.slice(0, 30));
+        resolve(availableItems.slice(0, 30));
         return;
       }
 
       const term = searchTerm.trim().toLowerCase();
-      const filtered = allItems.filter((item) => {
+      const filtered = availableItems.filter((item) => {
         const tName = (item.tradeName || '').toLowerCase();
         const sName = (item.scientificName || '').toLowerCase();
         const bCode = (item.barcode || '').toLowerCase();

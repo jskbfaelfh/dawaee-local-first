@@ -89,6 +89,11 @@ export class CheckoutDto {
   @MaxLength(100)
   offlineInvoiceNumber?: string; // رقم الفاتورة المحلي المطبوع للمريض للاعتماد السحابي الموحد
 
+  @IsString()
+  @IsOptional()
+  @MaxLength(150)
+  customerName?: string; // اسم الزبون / المشتري (اختياري)
+
   @IsArray()
   @IsOptional()
   @ValidateNested({ each: true })
@@ -175,6 +180,11 @@ export class OfflineSaleItemDto {
   @IsOptional()
   @Min(0)
   discountAmount?: number = 0;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(150)
+  customerName?: string;
 
   @IsString()
   @IsOptional()

@@ -130,11 +130,23 @@ export const BulkStockEntryView: React.FC = () => {
       return;
     }
 
+    if (navigator.onLine) {
+      try {
+        const data = await apiRequest<any[]>(`/medicines/search?q=${encodeURIComponent(term)}`);
+        setSearchResults(data || []);
+        return;
+      } catch (err) {
+        console.warn('Online catalog search failed, falling back to local database:', err);
+      }
+    }
+
+    // Offline search fallback
     try {
-      const data = await apiRequest<any[]>(`/medicines/search?q=${encodeURIComponent(term)}`);
-      setSearchResults(data || []);
-    } catch (err) {
-      console.error(err);
+      const { searchLocalMasterMedicines } = await import('../utils/localDatabase');
+      const localResults = await searchLocalMasterMedicines(term);
+      setSearchResults(localResults || []);
+    } catch (e) {
+      console.error('Offline master medicines search error:', e);
     }
   };
 
@@ -425,12 +437,43 @@ export const BulkStockEntryView: React.FC = () => {
         })),
       };
 
-      const result = await apiRequest<any>('/inventory/bulk-entry', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      if (navigator.onLine) {
+        try {
+          const result = await apiRequest<any>('/inventory/bulk-entry', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
 
-      setMessage({ type: 'success', text: result.message });
+          setMessage({ type: 'success', text: result.message });
+          setItems([]);
+          setSupplierName('');
+          setSupplierPhone('');
+          setSelectedSupplierId('');
+          setSupplierInvoiceNumber('');
+          setPaymentStatus('PAID');
+          setPaidAmount(0);
+          setDueDate('');
+          setNotes('');
+          setDirectDiscountValue(0);
+          fetchSuppliers();
+          return;
+        } catch (err: any) {
+          if (err?.status && err.status >= 400 && err.status < 500) {
+            setMessage({ type: 'error', text: err.message || 'فشل حفظ الوجبة' });
+            setLoading(false);
+            return;
+          }
+        }
+      }
+
+      // Offline Bulk Entry Fallback Queue
+      const { queueOutboxOperation } = await import('../utils/outboxQueue');
+      await queueOutboxOperation('PURCHASE', '/inventory/bulk-entry', payload);
+
+      setMessage({
+        type: 'success',
+        text: 'تم حفظ وتثبيت الوجبة محلياً بالمخزن! وسيتم مزامنتها تلقائياً فور توفر الإنترنت 📡',
+      });
       setItems([]);
       setSupplierName('');
       setSupplierPhone('');
@@ -441,9 +484,8 @@ export const BulkStockEntryView: React.FC = () => {
       setDueDate('');
       setNotes('');
       setDirectDiscountValue(0);
-      fetchSuppliers();
     } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'فشل حفظ الوجبة' });
+      setMessage({ type: 'error', text: err.message || 'فشل حفظ الوجبة محلياً' });
     } finally {
       setLoading(false);
     }

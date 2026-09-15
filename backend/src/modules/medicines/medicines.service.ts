@@ -17,7 +17,7 @@ export class MedicinesService {
    * Search medicines in Global Catalog by tradeName, scientificName, or barcode
    */
   async search(query: QueryMedicineDto) {
-    const { q, search, barcode, limit = 30 } = query;
+    const { q, search, barcode, updatedSince, limit = 30 } = query;
     const where: any = {};
 
     const searchTerm = (q || search || '').trim();
@@ -32,9 +32,16 @@ export class MedicinesService {
       ];
     }
 
+    if (updatedSince) {
+      const sinceDate = new Date(updatedSince);
+      if (!isNaN(sinceDate.getTime())) {
+        where.createdAt = { gte: sinceDate };
+      }
+    }
+
     return this.prisma.medicine.findMany({
       where,
-      take: Math.min(limit, 100),
+      take: Math.min(limit, 200),
       orderBy: { tradeName: 'asc' },
     });
   }

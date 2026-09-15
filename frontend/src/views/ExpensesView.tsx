@@ -78,30 +78,63 @@ export const ExpensesView: React.FC = () => {
     }
 
     setSaving(true);
-    try {
-      const res = await apiRequest<any>('/expenses', {
-        method: 'POST',
-        body: JSON.stringify({
-          title: title.trim(),
-          amount: Number(amount),
-          category,
-          expenseDate,
-          recipient: recipient.trim() || undefined,
-          notes: notes.trim() || undefined,
-        }),
-      });
+    const payload = {
+      title: title.trim(),
+      amount: Number(amount),
+      category,
+      expenseDate,
+      recipient: recipient.trim() || undefined,
+      notes: notes.trim() || undefined,
+    };
 
-      setMessage({ type: 'success', text: res.message || 'تم تسجيل المصروف بنجاح' });
+    if (navigator.onLine) {
+      try {
+        const res = await apiRequest<any>('/expenses', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+
+        setMessage({ type: 'success', text: res.message || 'تم تسجيل المصروف بنجاح' });
+        setShowModal(false);
+        setTitle('');
+        setAmount('');
+        setCategory('OTHER');
+        setRecipient('');
+        setNotes('');
+        fetchExpenses();
+        return;
+      } catch (err: any) {
+        if (err?.status && err.status >= 400 && err.status < 500) {
+          setMessage({ type: 'error', text: err.message || 'فشل تسجيل المصروف' });
+          setSaving(false);
+          return;
+        }
+      }
+    }
+
+    // Offline Fallback Queue
+    try {
+      const { queueOutboxOperation } = await import('../utils/outboxQueue');
+      await queueOutboxOperation('EXPENSE', '/expenses', payload);
+      setMessage({ type: 'success', text: 'تم تسجيل المصروف محلياً وسيتم مزامنته تلقائياً فور توفر الإنترنت! 📡' });
       setShowModal(false);
-      // Reset Form
       setTitle('');
       setAmount('');
       setCategory('OTHER');
       setRecipient('');
       setNotes('');
-      fetchExpenses();
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'فشل تسجيل المصروف' });
+      // Optimistically add to UI list
+      setExpenses((prev) => [
+        {
+          id: `local-exp-${Date.now()}`,
+          ...payload,
+          createdAt: new Date().toISOString(),
+          isPendingSync: true,
+        },
+        ...prev,
+      ]);
+    } catch (e: any) {
+      setMessage({ type: 'error', text: e.message || 'فشل حفظ المصروف محلياً' });
     } finally {
       setSaving(false);
     }

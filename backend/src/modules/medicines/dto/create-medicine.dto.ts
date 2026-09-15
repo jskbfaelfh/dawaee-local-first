@@ -48,6 +48,10 @@ export class QueryMedicineDto {
   @IsOptional()
   barcode?: string;
 
+  @IsString()
+  @IsOptional()
+  updatedSince?: string;
+
   @IsInt()
   @Min(1)
   @IsOptional()
