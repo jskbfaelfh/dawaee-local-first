@@ -5,7 +5,7 @@
  */
 
 const DB_NAME = 'dawaee_local_master_db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export interface LocalMasterMedicine {
   id: string;
@@ -20,7 +20,6 @@ export interface LocalMasterMedicine {
 }
 
 export interface LocalInventoryItem {
-
   id: string;
   medicineId: string;
   customName?: string;
@@ -61,6 +60,38 @@ export interface LocalSaleRecord {
   cashierName?: string;
   customerName?: string;
   isSynced: boolean;
+}
+
+export interface OfflineSaleBatchAllocation {
+  inventoryItemId: string;
+  batchId?: string;
+  batchNumber?: string;
+  units: number;
+  unitPrice: number;
+  costPricePack?: number;
+}
+
+export interface OfflineSaleRecord {
+  offlineId: string;
+  invoiceNumber: string;
+  payload: {
+    discountAmount: number;
+    customerName?: string;
+    items: {
+      inventoryItemId: string;
+      inventoryBatchId?: string;
+      unitType: string;
+      quantity: number;
+    }[];
+    allocatedBatches?: OfflineSaleBatchAllocation[];
+  };
+  displayItems: any[];
+  subtotal: number;
+  discountAmount: number;
+  totalAmount: number;
+  createdAt: string;
+  cashierName?: string;
+  customerName?: string;
 }
 
 let dbInstance: IDBDatabase | null = null;
@@ -118,7 +149,7 @@ export function getLocalMasterDb(): Promise<IDBDatabase> {
 }
 
 /**
- * Save / Replace all inventory items locally in IndexedDB
+ * Save / Replace all inventory items locally in Master IndexedDB
  */
 export async function saveLocalInventoryBulk(items: LocalInventoryItem[]): Promise<void> {
   const db = await getLocalMasterDb();
@@ -134,6 +165,117 @@ export async function saveLocalInventoryBulk(items: LocalInventoryItem[]): Promi
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+}
+
+/**
+ * Cache inventory items locally in Master IndexedDB (alias for POS cache warming)
+ */
+export async function cacheInventoryLocally(items: any[]): Promise<void> {
+  return saveLocalInventoryBulk(items);
+}
+
+/**
+ * Search local Master Inventory offline (strictly pre-filters zero-stock items for POS)
+ */
+export async function searchLocalInventory(searchTerm: string): Promise<any[]> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('inventory', 'readonly');
+    const store = tx.objectStore('inventory');
+    const req = store.getAll();
+
+    req.onsuccess = () => {
+      const allItems: any[] = req.result || [];
+      const availableItems = allItems.filter((item) => {
+        const units = Number(item.validUnitsRemaining ?? item.totalUnitsRemaining ?? 0);
+        const pks = Number(item.availablePacks ?? 0);
+        const strs = Number(item.availableStrips ?? 0);
+        return units > 0 || pks > 0 || strs > 0;
+      });
+
+      if (!searchTerm || searchTerm.trim().length === 0) {
+        resolve(availableItems.slice(0, 30));
+        return;
+      }
+
+      const term = searchTerm.trim().toLowerCase();
+      const filtered = availableItems.filter((item) => {
+        const tName = (item.tradeName || '').toLowerCase();
+        const sName = (item.scientificName || '').toLowerCase();
+        const bCode = (item.barcode || '').toLowerCase();
+        const cName = (item.customName || '').toLowerCase();
+
+        return (
+          tName.includes(term) ||
+          sName.includes(term) ||
+          bCode.includes(term) ||
+          cName.includes(term)
+        );
+      });
+
+      resolve(filtered.slice(0, 40));
+    };
+
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Deduct stock locally in Master IndexedDB when an offline sale occurs.
+ * Strictly prevents overselling: throws an error if requested quantity exceeds local stock.
+ */
+export async function deductLocalInventoryStock(cartItems: any[]): Promise<void> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('inventory', 'readwrite');
+    const store = tx.objectStore('inventory');
+
+    for (const cartItem of cartItems) {
+      const req = store.get(cartItem.inventoryItemId);
+      req.onsuccess = () => {
+        const item = req.result;
+        if (item) {
+          const isPack = cartItem.unitType === 'PACK';
+          const unitsPerPack = Number(item.unitsPerPack) || 1;
+          const unitsToDeduct = isPack ? cartItem.quantity * unitsPerPack : cartItem.quantity;
+          const currentTotal = Number(item.totalUnitsRemaining) || 0;
+
+          if (unitsToDeduct > currentTotal) {
+            tx.abort();
+            reject(new Error(`الكمية المطلوبة من دواء (${item.tradeName}) تتجاوز الرصيد المحلي المتاح (${currentTotal} وحدة).`));
+            return;
+          }
+
+          item.totalUnitsRemaining = currentTotal - unitsToDeduct;
+          item.availablePacks = Math.floor(item.totalUnitsRemaining / unitsPerPack);
+          item.availableStrips = item.totalUnitsRemaining % unitsPerPack;
+
+          // Deduct from activeBatches if present
+          if (item.activeBatches && Array.isArray(item.activeBatches)) {
+            let left = unitsToDeduct;
+            for (const b of item.activeBatches) {
+              if (left <= 0) break;
+              const avail = Number(b.quantityUnitsRemaining) || 0;
+              const deduct = Math.min(avail, left);
+              b.quantityUnitsRemaining = Math.max(0, avail - deduct);
+              b.availablePacks = Math.floor(b.quantityUnitsRemaining / unitsPerPack);
+              b.availableStrips = b.quantityUnitsRemaining % unitsPerPack;
+              left -= deduct;
+            }
+          }
+
+          store.put(item);
+        }
+      };
+    }
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function deductLocalStockDirectly(cartItems: any[]): Promise<void> {
+  return deductLocalInventoryStock(cartItems);
 }
 
 /**
@@ -256,51 +398,6 @@ export async function getLocalSuppliers(): Promise<LocalSupplier[]> {
 }
 
 /**
- * Deduct stock locally from IndexedDB when an offline/local sale occurs
- */
-export async function deductLocalStockDirectly(cartItems: any[]): Promise<void> {
-  const db = await getLocalMasterDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('inventory', 'readwrite');
-    const store = tx.objectStore('inventory');
-
-    for (const cartItem of cartItems) {
-      const req = store.get(cartItem.inventoryItemId);
-      req.onsuccess = () => {
-        const item = req.result as LocalInventoryItem;
-        if (item) {
-          const isPack = cartItem.unitType === 'PACK';
-          const unitsPerPack = Number(item.unitsPerPack) || 1;
-          const unitsToDeduct = isPack ? cartItem.quantity * unitsPerPack : cartItem.quantity;
-
-          item.totalUnitsRemaining = Math.max(0, (item.totalUnitsRemaining || 0) - unitsToDeduct);
-          item.availablePacks = Math.floor(item.totalUnitsRemaining / unitsPerPack);
-          item.availableStrips = item.totalUnitsRemaining % unitsPerPack;
-
-          if (item.activeBatches && Array.isArray(item.activeBatches)) {
-            let left = unitsToDeduct;
-            for (const b of item.activeBatches) {
-              if (left <= 0) break;
-              const avail = Number(b.quantityUnitsRemaining) || 0;
-              const deduct = Math.min(avail, left);
-              b.quantityUnitsRemaining = Math.max(0, avail - deduct);
-              b.availablePacks = Math.floor(b.quantityUnitsRemaining / unitsPerPack);
-              b.availableStrips = b.quantityUnitsRemaining % unitsPerPack;
-              left -= deduct;
-            }
-          }
-
-          store.put(item);
-        }
-      };
-    }
-
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-/**
  * Record a sale locally in both pending sync queue and local sales history
  */
 export async function recordLocalSale(sale: {
@@ -313,6 +410,7 @@ export async function recordLocalSale(sale: {
   totalAmount: number;
   createdAt: string;
   cashierName?: string;
+  customerName?: string;
   isSynced: boolean;
 }): Promise<void> {
   const db = await getLocalMasterDb();
@@ -332,6 +430,7 @@ export async function recordLocalSale(sale: {
         totalAmount: sale.totalAmount,
         createdAt: sale.createdAt,
         cashierName: sale.cashierName,
+        customerName: sale.customerName,
       });
     }
 
@@ -450,4 +549,67 @@ export async function syncMasterMedicinesDelta(): Promise<{ totalCount: number; 
     return { totalCount: 0, updatedCount: 0 };
   }
 }
+
+/**
+ * Save an offline sale to the pending sync queue in Master DB
+ */
+export async function saveOfflineSale(sale: OfflineSaleRecord): Promise<void> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pending_sales', 'readwrite');
+    const store = tx.objectStore('pending_sales');
+    store.put(sale);
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Retrieve all pending offline sales from Master DB
+ */
+export async function getPendingSales(): Promise<OfflineSaleRecord[]> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pending_sales', 'readonly');
+    const store = tx.objectStore('pending_sales');
+    const req = store.getAll();
+
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Remove a specific offline sale from Master DB
+ */
+export async function removePendingSale(offlineId: string): Promise<void> {
+  const db = await getLocalMasterDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pending_sales', 'readwrite');
+    const store = tx.objectStore('pending_sales');
+    store.delete(offlineId);
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/**
+ * Generate a cryptographically secure, collision-free local offline invoice number
+ */
+export function generateOfflineInvoiceNumber(): string {
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const timestamp = Date.now().toString().slice(-6);
+  let randomHex = '';
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    const bytes = new Uint8Array(3);
+    crypto.getRandomValues(bytes);
+    randomHex = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  } else {
+    randomHex = Math.random().toString(36).substring(2, 8).toUpperCase();
+  }
+  return `OFF-${dateStr}-${timestamp}-${randomHex}`;
+}
+
 

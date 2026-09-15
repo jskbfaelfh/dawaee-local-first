@@ -40,13 +40,12 @@ import {
   cacheInventoryLocally,
   searchLocalInventory,
   deductLocalInventoryStock,
-  saveOfflineSale,
   getPendingSales,
-  removePendingSale,
   generateOfflineInvoiceNumber,
   type OfflineSaleRecord,
 } from '../utils/posOfflineDb';
-import { getLocalDailySummary } from '../utils/localDatabase';
+import { getLocalDailySummary, recordLocalSale } from '../utils/localDatabase';
+import { queueOutboxOperation, processOutboxQueue } from '../utils/outboxQueue';
 
 interface ActiveBatchInfo {
   id: string;
@@ -371,45 +370,28 @@ export const PosView: React.FC = () => {
     }
   };
 
-  // Sync offline sales to cloud
+  // Sync offline sales & operations to cloud via unified Outbox
   const syncPendingSales = async () => {
     if (isSyncing || !navigator.onLine) return;
     try {
-      const pending = await getPendingSales();
-      if (pending.length === 0) return;
-
       setIsSyncing(true);
-      const syncPayload = {
-        sales: pending.map((s) => ({
-          offlineId: s.offlineId,
-          offlineInvoiceNumber: s.invoiceNumber,
-          items: s.payload.items,
-          allocatedBatches: s.payload.allocatedBatches,
-          discountAmount: s.payload.discountAmount,
-          createdAt: s.createdAt,
-        })),
-      };
-
-      const res = await apiRequest<any>('/pos/sync-offline', {
-        method: 'POST',
-        body: JSON.stringify(syncPayload),
-      });
-
-      if (res.results && Array.isArray(res.results)) {
-        for (const r of res.results) {
-          if (r.success) {
-            await removePendingSale(r.offlineId);
-          }
-        }
-      }
-
+      const { syncedCount, failedCount } = await processOutboxQueue();
       await refreshPendingCount();
-      setMessage({
-        type: 'success',
-        text: `تمت مزامنة (${res.syncedCount}) فواتير تم بيعها أثناء انقطاع الإنترنت بنجاح مع السحابة! ☁️✅`,
-      });
+
+      if (syncedCount > 0) {
+        setMessage({
+          type: 'success',
+          text: `تمت مزامنة (${syncedCount}) عملية أوفلاين بنجاح مع السحابة! ☁️✅`,
+        });
+      }
+      if (failedCount > 0) {
+        setMessage({
+          type: 'error',
+          text: `تنبيه: تعذر مزامنة ${failedCount} عملية أوفلاين. يرجى التحقق من حالة الاتصال.`,
+        });
+      }
     } catch (err: any) {
-      console.warn('Sync failed or postponed:', err);
+      console.warn('Outbox sync failed or postponed:', err);
     } finally {
       setIsSyncing(false);
     }
@@ -686,6 +668,22 @@ export const PosView: React.FC = () => {
         });
 
         setCompletedSale(result);
+
+        // Record in local sales history for shift summary (marked as synced)
+        recordLocalSale({
+          offlineId: result.id || crypto.randomUUID(),
+          invoiceNumber: result.invoiceNumber,
+          payload,
+          items: result.items || [],
+          subtotal: result.subtotal || subtotal,
+          discountAmount: result.discountAmount || discountAmount,
+          totalAmount: result.totalAmount || total,
+          createdAt: result.createdAt || new Date().toISOString(),
+          cashierName: result.cashierName || 'كاشير',
+          customerName: customerName.trim() || undefined,
+          isSynced: true,
+        }).catch(() => {});
+
         setCart([]);
         setDiscountAmount(0);
         setDiscountPercent('');
@@ -768,10 +766,38 @@ export const PosView: React.FC = () => {
         customerName: customerName.trim() || undefined,
       };
 
-      // 1. Save to local IndexedDB pending queue
-      await saveOfflineSale(offlineRecord);
+      // 1. Record sale locally in IndexedDB sales_history (for shift summary) and pending_sales
+      await recordLocalSale({
+        offlineId,
+        invoiceNumber: offlineInvoiceNum,
+        payload: offlineRecord.payload,
+        items: displayItems,
+        subtotal,
+        discountAmount,
+        totalAmount: total,
+        createdAt: offlineRecord.createdAt,
+        cashierName: 'كاشير (محلي)',
+        customerName: customerName.trim() || undefined,
+        isSynced: false,
+      });
 
-      // 2. Deduct stock from local IndexedDB
+      // 2. Queue in unified Outbox for background cloud sync
+      const saleSyncPayload = {
+        sales: [
+          {
+            offlineId,
+            offlineInvoiceNumber: offlineInvoiceNum,
+            items: payload.items,
+            allocatedBatches,
+            discountAmount,
+            customerName: customerName.trim() || undefined,
+            createdAt: offlineRecord.createdAt,
+          },
+        ],
+      };
+      await queueOutboxOperation('SALE', '/pos/sync-offline', saleSyncPayload);
+
+      // 3. Deduct stock from local IndexedDB
       await deductLocalInventoryStock(cart);
 
       // 3. Complete sale UI
